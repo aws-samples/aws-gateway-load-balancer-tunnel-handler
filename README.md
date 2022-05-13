@@ -44,6 +44,11 @@ The <X> in the interface name is replaced with the base 60 encoded ENI ID (to fi
 device name limit).
 ```
 
+## Source code layout
+main.cpp contains the start of the code, but primarily interfaces with GeneveHandler, defined in GeneveHandler.cpp. 
+That class instantiates UDPPacketReceiver and TunInterface as needed, and generally manages the entire packet handling flow. 
+GenevePacket and PacketHeader handle parsing and validating GENEVE packets and IP packets respectively, and are called by GeneveHandler as needed.
+
 ## Security
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
