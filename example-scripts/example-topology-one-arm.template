@@ -1,0 +1,362 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Set up a demonstration topology for using gwlbtun in one arm mode
+Parameters:
+  LinuxAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: AMI ID to use for GWLB appliances
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  GWLBInstanceType:
+    Type: String
+    Description: Instance type code to use for this stamp's GWLB appliances. The default is fine for light testing, for heavier workloads you should consider a c5n instance.
+    Default: t2.micro
+
+Resources:
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join [ "-", [ !Ref AWS::StackName, "EC2Role" ] ]
+      Description: Role for all EC2 instances to run under to allow SSM and S3
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonSSMPatchAssociation
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+  EC2RoleInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Join [ "-", [ !Ref AWS::StackName, "EC2Role" ] ]
+      Path: /
+      Roles:
+        - !Ref EC2Role
+
+  GWLBTunVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.10.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: GWLBTun Example VPC
+
+  GWLBTunPrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '' ]
+      CidrBlock: 10.10.1.0/24
+      VpcId: !Ref GWLBTunVPC
+      Tags:
+        - Key: Name
+          Value: GWLBTun Instances private subnet
+
+  GWLBTunPrivateRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref GWLBTunVPC
+      Tags:
+        - Key: Name
+          Value: GWLBTun Prviate
+
+  GWLBTunPrivateRTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref GWLBTunPrivateSubnet
+      RouteTableId: !Ref GWLBTunPrivateRT
+
+   # Set up the GWLB
+  GWLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Join [ "-", [ !Ref AWS::StackName, "GWLB" ] ]
+      Type: gateway
+      Subnets:
+        - !Ref GWLBTunPrivateSubnet
+
+  GWLBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join [ "-", [ !Ref AWS::StackName, "Instances" ] ]
+      VpcId: !Ref GWLBTunVPC
+      Protocol: GENEVE
+      Port: 6081
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: 80
+      HealthCheckPath: /
+      HealthCheckEnabled: true
+      TargetType: ip  # TargetType IP allows specifying the specific NIC on the GWLBTun instance to target
+      Targets:
+        - Id: !GetAtt GWLBTunInstanceOneArm.PrivateIp
+
+  GWLBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref GWLB
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref GWLBTargetGroup
+
+  GWLBEndpointService:
+    Type: AWS::EC2::VPCEndpointService
+    Properties:
+      GatewayLoadBalancerArns:
+        - !Ref GWLB
+      AcceptanceRequired: false
+
+  GWLBe:
+    Type: AWS::EC2::VPCEndpoint
+    DependsOn: GWLBEndpointService
+    Properties:
+      VpcId: !Ref ApplicationVPC
+      ServiceName: !Sub "com.amazonaws.vpce.${AWS::Region}.${GWLBEndpointService}"
+      VpcEndpointType: GatewayLoadBalancer
+      SubnetIds:
+        - !Ref ApplicationGWLBeSubnet
+
+  # Build a GWLBTun instance
+  GWLBTunInstanceOneArm:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LinuxAmiId
+      InstanceType: !Ref GWLBInstanceType
+      IamInstanceProfile: !Join [ "-", [ !Ref AWS::StackName, "EC2Role" ] ]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: True
+          SubnetId: !Ref GWLBTunPrivateSubnet
+          GroupSet:
+            - Ref: GWLBTunSG
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash -ex
+          yum -y groupinstall "Development Tools"
+          yum -y install cmake3 tc
+          cd /root
+          git clone https://github.com/aws-samples/aws-gateway-load-balancer-tunnel-handler.git
+          cd aws-gateway-load-balancer-tunnel-handler
+          cmake3 .
+          make
+
+          echo "[Unit]" > /usr/lib/systemd/system/gwlbtun.service
+          echo "Description=AWS GWLB Tunnel Handler" >> /usr/lib/systemd/system/gwlbtun.service
+          echo "" >> /usr/lib/systemd/system/gwlbtun.service
+          echo "[Service]" >> /usr/lib/systemd/system/gwlbtun.service
+          echo "ExecStart=/root/aws-gateway-load-balancer-tunnel-handler/gwlbtun -c /root/aws-gateway-load-balancer-tunnel-handler/example-scripts/create-passthrough.sh -p 80" >> /usr/lib/systemd/system/gwlbtun.service
+          echo "Restart=always" >> /usr/lib/systemd/system/gwlbtun.service
+          echo "RestartSec=5s" >> /usr/lib/systemd/system/gwlbtun.service
+
+          systemctl daemon-reload
+          systemctl enable --now --no-block gwlbtun.service
+          systemctl start gwlbtun.service
+          echo
+      Tags:
+        - Key: Name
+          Value: !Join [ "-", [ !Ref AWS::StackName, "GWLBTun" ] ]
+
+  GWLBTunSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref GWLBTunVPC
+      GroupName: GWLBTun Security
+      GroupDescription: GWLBTun Security
+      SecurityGroupIngress:
+        - CidrIp: !GetAtt GWLBTunVPC.CidrBlock
+          IpProtocol: -1
+
+  # Make an Internet Gateway in our GWLB VPC so it can download our source code and some packages.
+  GWLBTunIG:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: GWLBTun Internet Gateway
+
+  GWLBTunIGA:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref GWLBTunIG
+      VpcId: !Ref GWLBTunVPC
+
+  GWLBTunIGRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GWLBTunIGA
+    Properties:
+      RouteTableId: !Ref GWLBTunPrivateRT
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref GWLBTunIG
+
+  # Set up the Application VPC
+  ApplicationVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: Application VPC
+
+  ApplicationPrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '' ]
+      CidrBlock: 10.20.0.0/24
+      VpcId: !Ref ApplicationVPC
+      Tags:
+        - Key: Name
+          Value: Application Private subnet
+
+  ApplicationPrivateRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ApplicationVPC
+      Tags:
+        - Key: Name
+          Value: Application Private subnet
+
+  ApplicationPrivateRTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ApplicationPrivateSubnet
+      RouteTableId: !Ref ApplicationPrivateRT
+
+  ApplicationGWLBeSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '' ]
+      CidrBlock: 10.20.130.0/24
+      VpcId: !Ref ApplicationVPC
+      Tags:
+        - Key: Name
+          Value: Application GWLBe subnet
+
+  ApplicationGWLBeRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ApplicationVPC
+      Tags:
+        - Key: Name
+          Value: Application GWLBe subnet
+
+  ApplicationGWLBeRTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ApplicationGWLBeSubnet
+      RouteTableId: !Ref ApplicationGWLBeRT
+
+  ApplicationNATSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '' ]
+      CidrBlock: 10.20.140.0/24
+      VpcId: !Ref ApplicationVPC
+      Tags:
+        - Key: Name
+          Value: Application NAT subnet
+
+  ApplicationNATRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ApplicationVPC
+      Tags:
+        - Key: Name
+          Value: Application NAT subnet
+
+  ApplicationNATRTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ApplicationNATSubnet
+      RouteTableId: !Ref ApplicationNATRT
+
+  # Make a NAT Gateway in our application VPC for traffic leaving GWLB to go to
+  ApplicationNGEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  ApplicationNG:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      ConnectivityType: public
+      AllocationId: !GetAtt ApplicationNGEIP.AllocationId
+      SubnetId: !Ref ApplicationNATSubnet
+
+  # Make an Internet Gateway in our application VPC and route to it from the public subnet.
+  ApplicationIG:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: Application Internet Gateway
+
+  ApplicationIGA:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref ApplicationIG
+      VpcId: !Ref ApplicationVPC
+
+  # Route traffic from our applications to the GWLB endpoint
+  ApplicationPrivateGWLBRouteOut:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref ApplicationPrivateRT
+      VpcEndpointId: !Ref GWLBe
+      DestinationCidrBlock: 0.0.0.0/0
+
+  # Route the return from GWLB to the NAT Gateway for non-local
+  ApplicationGWLBtoNATRouteOut:
+    Type: AWS::EC2::Route
+    DependsOn: ApplicationIGA
+    Properties:
+      RouteTableId: !Ref ApplicationGWLBeRT
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref ApplicationNG
+
+  # Route traffic out from the NAT GW to the IGW
+  ApplicationNATtoIGWRouteOut:
+    Type: AWS::EC2::Route
+    DependsOn: ApplicationIGA
+    Properties:
+      RouteTableId: !Ref ApplicationNATRT
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ApplicationIG
+
+  # Route traffic coming in back to our GWLBe
+  ApplicationNATtoGWLBeRouteIn:
+    Type: AWS::EC2::Route
+    DependsOn: ApplicationIGA
+    Properties:
+      RouteTableId: !Ref ApplicationNATRT
+      DestinationCidrBlock: 10.20.0.0/24
+      VpcEndpointId: !Ref GWLBe
+
+  # Finally, create a test application instance
+  ApplicationInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LinuxAmiId
+      InstanceType: t2.micro
+      IamInstanceProfile: !Join [ "-", [ !Ref AWS::StackName, "EC2Role" ] ]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref ApplicationPrivateSubnet
+      Tags:
+        - Key: Name
+          Value: !Join [ "-", [ !Ref AWS::StackName, "Application" ] ]

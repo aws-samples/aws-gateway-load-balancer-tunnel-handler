@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.13)
+project(gwlbtun)
+
+add_compile_options("-fstack-protector-all")
+# add_compile_options("-fsanitize=address")
+add_compile_options("-fno-omit-frame-pointer")
+# add_link_options("-lasan")
+set(CMAKE_CXX_STANDARD 17)
+find_package(Threads)
+add_executable(gwlbtun main.cpp UDPPacketReceiver.cpp UDPPacketReceiver.h GenevePacket.cpp GenevePacket.h TunInterface.cpp TunInterface.h utils.cpp utils.h PacketHeader.cpp PacketHeader.h GeneveHandler.cpp GeneveHandler.h)
+target_link_libraries (gwlbtun ${CMAKE_THREAD_LIBS_INIT})
