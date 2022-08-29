@@ -174,7 +174,7 @@ int main(int argc, char *argv[])
     {
         if((healthSocket = socket(AF_INET6, SOCK_STREAM, 0)) == 0)
         {
-            perror("Creating health check socket filaed");
+            perror("Creating health check socket failed");
             exit(EXIT_FAILURE);
         }
 
@@ -203,10 +203,13 @@ int main(int argc, char *argv[])
     while(keepRunning)
     {
         FD_ZERO(&fds);
-        FD_SET(healthSocket, &fds);
+        if(healthCheck > 0)
+        {
+            FD_SET(healthSocket, &fds);
+        }
 
         ready = pselect(healthSocket + 1, &fds, nullptr, nullptr, &timeout, nullptr);
-        if(ready > 0 && FD_ISSET(healthSocket, &fds))
+        if(ready > 0 && healthCheck > 0 && FD_ISSET(healthSocket, &fds))
         {
             // Process a health check client
             int hsClient;
@@ -231,7 +234,7 @@ int main(int argc, char *argv[])
     // The loop was interrupted (most likely by Ctrl-C or likewise).  Clean up a few things.
     printf("Shutting down...\n");
     delete(gh);
-    close(healthSocket);
+    if(healthCheck > 0) close(healthSocket);
     printf("Shutdown complete.\n");
 
     return 0;
