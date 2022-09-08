@@ -34,7 +34,7 @@ Example: ./gwlbtun
 ---------------------------------------------------------------------------------------------------------
 
 Hook scripts arguments:
-These arguments are provided to the hook scripts (provided by the -c <FILE> or -r <FILE> command options).
+These arguments are provided when gwlbtun calls the hook scripts (the scrpits are in the -c <FILE> or -r <FILE> command options).
 On gwlbtun startup, it will automatically create gwi-<X> and gwo-<X> interfaces upon seeing the first packet from a specific GWLBE, and the hook scripts are invoked when interfaces are created or destroyed. You should at least disable rpf_filter for the gwi-<X> tunnel interface with the hook scripts.
 The hook scripts will be called with the following arguments:
 1: The string 'CREATE' or 'DESTROY', depending on which operation is occurring.
