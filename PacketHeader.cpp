@@ -60,7 +60,10 @@ PacketHeader::PacketHeader(unsigned char *pktbuf, ssize_t pktlen)
  */
 bool PacketHeader::operator==(const PacketHeader &ph) const
 {
-    return prot == ph.prot && src == ph.src && dst == ph.dst && srcpt == ph.srcpt && dstpt == ph.dstpt;
+    // also allowing return traffic
+    return prot == ph.prot &&
+           ((src == ph.src && dst == ph.dst) || (src == ph.dst && dst == ph.src)) &&
+           ((srcpt == ph.srcpt && dstpt == ph.dstpt) || (srcpt == ph.dstpt && dstpt == ph.srcpt));
 }
 
 /**
