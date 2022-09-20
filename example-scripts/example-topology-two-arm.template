@@ -1,6 +1,6 @@
 ---
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Set up a demonstration topology for using gwlbtun in 2 arm mode
+Description: Set up a demonstration topology for using gwlbtun in two-arm mode
 Parameters:
   LinuxAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
@@ -8,7 +8,7 @@ Parameters:
     Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
   GWLBInstanceType:
     Type: String
-    Description: Instance type code to use for this stamp's GWLB appliances. The default is fine for light testing, for heavier workloads you should consider a c5n instance.
+    Description: Instance type code to use for the GWLB appliances. The default is fine for light testing, for heavier workloads you should consider a c5n instance.
     Default: t2.micro
 
 Resources:
@@ -47,17 +47,7 @@ Resources:
       EnableDnsSupport: true
       Tags:
         - Key: Name
-          Value: GWLBTun Example VPC
-
-  GWLBTunPrivateSubnet:
-    Type: AWS::EC2::Subnet
-    Properties:
-      AvailabilityZone: !Select [0, !GetAZs '' ]
-      CidrBlock: 10.10.1.0/24
-      VpcId: !Ref GWLBTunVPC
-      Tags:
-        - Key: Name
-          Value: GWLBTun Instances Private
+          Value: !Join [ "-", [ !Ref AWS::StackName, "GWLBTun" ] ]
 
   GWLBTunPublicSubnet:
     Type: AWS::EC2::Subnet
@@ -67,21 +57,7 @@ Resources:
       VpcId: !Ref GWLBTunVPC
       Tags:
         - Key: Name
-          Value: GWLBTun Instances Public
-
-  GWLBTunPrivateRT:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref GWLBTunVPC
-      Tags:
-        - Key: Name
-          Value: GWLBTun Private
-
-  GWLBTunPrivateRTA:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref GWLBTunPrivateSubnet
-      RouteTableId: !Ref GWLBTunPrivateRT
+          Value: !Join [ "-", [ !Ref AWS::StackName, "GWLBTun public" ] ]
 
   GWLBTunPublicRT:
     Type: AWS::EC2::RouteTable
@@ -89,7 +65,7 @@ Resources:
       VpcId: !Ref GWLBTunVPC
       Tags:
         - Key: Name
-          Value: GWLBTun Public
+          Value: !Join [ "-", [ !Ref AWS::StackName, "GWLBTun public" ] ]
 
   GWLBTunPublicRTA:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -104,7 +80,7 @@ Resources:
       Name: !Join [ "-", [ !Ref AWS::StackName, "GWLB" ] ]
       Type: gateway
       Subnets:
-        - !Ref GWLBTunPrivateSubnet
+        - !Ref GWLBTunPublicSubnet
 
   GWLBTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -119,7 +95,7 @@ Resources:
       HealthCheckEnabled: true
       TargetType: ip  # TargetType IP allows specifying the specific NIC on the GWLBTun instance to target
       Targets:
-        - Id: !GetAtt GWLBTunEth0.PrimaryPrivateIpAddress
+        - Id: !GetAtt GWLBTunInstanceTwoArm.PrivateIp
 
   GWLBListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -144,7 +120,7 @@ Resources:
       ServiceName: !Sub "com.amazonaws.vpce.${AWS::Region}.${GWLBEndpointService}"
       VpcEndpointType: GatewayLoadBalancer
       SubnetIds:
-        - !Ref ApplicationPublicSubnet
+        - !Ref ApplicationPrivateSubnet
 
   # Build a GWLBTun instance
   GWLBTunInstanceTwoArm:
@@ -153,15 +129,17 @@ Resources:
       ImageId: !Ref LinuxAmiId
       InstanceType: !Ref GWLBInstanceType
       IamInstanceProfile: !Join [ "-", [ !Ref AWS::StackName, "EC2Role" ] ]
+      SourceDestCheck: false
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
             VolumeSize: 8
       NetworkInterfaces:
         - DeviceIndex: 0
-          NetworkInterfaceId: !Ref GWLBTunEth0
-        - DeviceIndex: 1
-          NetworkInterfaceId: !Ref GWLBTunEth1
+          AssociatePublicIpAddress: True
+          SubnetId: !Ref GWLBTunPublicSubnet
+          GroupSet:
+            - Ref: GWLBTunSG
       UserData:
         Fn::Base64: |
           #!/bin/bash -ex
@@ -177,7 +155,7 @@ Resources:
           echo "Description=AWS GWLB Tunnel Handler" >> /usr/lib/systemd/system/gwlbtun.service
           echo "" >> /usr/lib/systemd/system/gwlbtun.service
           echo "[Service]" >> /usr/lib/systemd/system/gwlbtun.service
-          echo "ExecStart=/root/aws-gateway-load-balancer-tunnel-handler/gwlbtun -c /root/aws-gateway-load-balancer-tunnel-handler/example-scripts/create-passthrough.sh -p 80" >> /usr/lib/systemd/system/gwlbtun.service
+          echo "ExecStart=/root/aws-gateway-load-balancer-tunnel-handler/gwlbtun -c /root/aws-gateway-load-balancer-tunnel-handler/example-scripts/create-nat.sh -p 80" >> /usr/lib/systemd/system/gwlbtun.service
           echo "Restart=always" >> /usr/lib/systemd/system/gwlbtun.service
           echo "RestartSec=5s" >> /usr/lib/systemd/system/gwlbtun.service
 
@@ -193,26 +171,11 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       VpcId: !Ref GWLBTunVPC
-      GroupName: GWLBTun Security
+      GroupName: !Join [ "-", [ !Ref AWS::StackName, "GWLBTun Security" ] ]
       GroupDescription: GWLBTun Security
       SecurityGroupIngress:
         - CidrIp: !GetAtt GWLBTunVPC.CidrBlock
           IpProtocol: -1
-
-  GWLBTunEth0:
-    Type: AWS::EC2::NetworkInterface
-    Properties:
-      SubnetId: !Ref GWLBTunPrivateSubnet
-      GroupSet:
-        - Ref: GWLBTunSG
-
-  GWLBTunEth1:
-    Type: AWS::EC2::NetworkInterface
-    Properties:
-      SubnetId: !Ref GWLBTunPublicSubnet
-      GroupSet:
-        - Ref: GWLBTunSG
-
 
   # Make an Internet Gateway in our GWLB VPC and route to it from the public subnet.
   GWLBTunIG:
@@ -220,7 +183,7 @@ Resources:
     Properties:
       Tags:
         - Key: Name
-          Value: GWLBTun Internet Gateway
+          Value: !Join [ "-", [ !Ref AWS::StackName, "GWLBTun" ] ]
 
   GWLBTunIGA:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -232,7 +195,7 @@ Resources:
     Type: AWS::EC2::Route
     DependsOn: GWLBTunIGA
     Properties:
-      RouteTableId: !Ref GWLBTunPrivateRT
+      RouteTableId: !Ref GWLBTunPublicRT
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref GWLBTunIG
 
@@ -245,32 +208,7 @@ Resources:
       EnableDnsSupport: true
       Tags:
         - Key: Name
-          Value: Application VPC
-
-  ApplicationPublicSubnet:
-    Type: AWS::EC2::Subnet
-    Properties:
-      AvailabilityZone: !Select [0, !GetAZs '' ]
-      CidrBlock: 10.20.128.0/24
-      MapPublicIpOnLaunch: true
-      VpcId: !Ref ApplicationVPC
-      Tags:
-        - Key: Name
-          Value: Application Public subnet
-
-  ApplicationPublicRT:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref ApplicationVPC
-      Tags:
-        - Key: Name
-          Value: Application Public subnet route table
-
-  ApplicationPublicRTA:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref ApplicationPublicSubnet
-      RouteTableId: !Ref ApplicationPublicRT
+          Value: !Join [ "-", [ !Ref AWS::StackName, "Application" ] ]
 
   ApplicationPrivateSubnet:
     Type: AWS::EC2::Subnet
@@ -280,7 +218,7 @@ Resources:
       VpcId: !Ref ApplicationVPC
       Tags:
         - Key: Name
-          Value: Application Private subnet
+          Value: !Join [ "-", [ !Ref AWS::StackName, "Application private" ] ]
 
   ApplicationPrivateRT:
     Type: AWS::EC2::RouteTable
@@ -288,7 +226,7 @@ Resources:
       VpcId: !Ref ApplicationVPC
       Tags:
         - Key: Name
-          Value: Application Private subnet route table
+          Value: !Join [ "-", [ !Ref AWS::StackName, "Application private" ] ]
 
   ApplicationPrivateRTA:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -304,29 +242,7 @@ Resources:
       VpcEndpointId: !Ref GWLBe
       DestinationCidrBlock: 0.0.0.0/0
 
-  # Make an Internet Gateway in our application VPC and route to it from the public subnet.
-  ApplicationIG:
-    Type: AWS::EC2::InternetGateway
-    Properties:
-      Tags:
-        - Key: Name
-          Value: Application Internet Gateway
-
-  ApplicationIGA:
-    Type: AWS::EC2::VPCGatewayAttachment
-    Properties:
-      InternetGatewayId: !Ref ApplicationIG
-      VpcId: !Ref ApplicationVPC
-
-  ApplicationIGRoute:
-    Type: AWS::EC2::Route
-    DependsOn: ApplicationIGA
-    Properties:
-      RouteTableId: !Ref ApplicationPublicRT
-      DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref ApplicationIG
-
-  # Finally, create a test application instance
+  # Create a test application instance
   ApplicationInstance:
     Type: AWS::EC2::Instance
     Properties:
@@ -343,3 +259,43 @@ Resources:
       Tags:
         - Key: Name
           Value: !Join [ "-", [ !Ref AWS::StackName, "Application" ] ]
+
+  # For the two-arm traffic return, create a Transit Gateway, attachments to both VPCs, and set routing.
+  TGW:
+    Type: AWS::EC2::TransitGateway
+    Properties:
+      AmazonSideAsn: 64512
+      DefaultRouteTableAssociation: enable
+      DefaultRouteTablePropagation: enable
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName} TGW
+      Description: !Sub ${AWS::StackName} TGW
+  TGWtoGWLBTun:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      SubnetIds:
+        - !Ref GWLBTunPublicSubnet
+      TransitGatewayId: !Ref TGW
+      VpcId: !Ref GWLBTunVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-GWLBTun"
+  TGWtoApplication:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      SubnetIds:
+        - !Ref ApplicationPrivateSubnet
+      TransitGatewayId: !Ref TGW
+      VpcId: !Ref ApplicationVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-Application"
+  TGWRouteGWLBTunToApplication:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 10.20.0.0/16
+      RouteTableId: !Ref GWLBTunPublicRT
+      TransitGatewayId: !Ref TGW
+    DependsOn:
+      - TGWtoGWLBTun
