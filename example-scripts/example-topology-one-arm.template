@@ -1,6 +1,6 @@
 ---
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Set up a demonstration topology for using gwlbtun in one arm mode
+Description: Set up a demonstration topology for using gwlbtun in one-arm mode
 Parameters:
   LinuxAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
@@ -8,7 +8,7 @@ Parameters:
     Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
   GWLBInstanceType:
     Type: String
-    Description: Instance type code to use for this stamp's GWLB appliances. The default is fine for light testing, for heavier workloads you should consider a c5n instance.
+    Description: Instance type code to use for the GWLB appliances. The default is fine for light testing, for heavier workloads you should consider a c5n instance.
     Default: t2.micro
 
 Resources:
@@ -47,7 +47,7 @@ Resources:
       EnableDnsSupport: true
       Tags:
         - Key: Name
-          Value: GWLBTun Example VPC
+          Value: !Join [ "-", [ !Ref AWS::StackName, "gwlbtun" ] ]
 
   GWLBTunPrivateSubnet:
     Type: AWS::EC2::Subnet
@@ -57,7 +57,7 @@ Resources:
       VpcId: !Ref GWLBTunVPC
       Tags:
         - Key: Name
-          Value: GWLBTun Instances private subnet
+          Value: !Join [ "-", [ !Ref AWS::StackName, "gwlbtun private" ] ]
 
   GWLBTunPrivateRT:
     Type: AWS::EC2::RouteTable
@@ -65,7 +65,7 @@ Resources:
       VpcId: !Ref GWLBTunVPC
       Tags:
         - Key: Name
-          Value: GWLBTun Prviate
+          Value: !Join [ "-", [ !Ref AWS::StackName, "gwlbtun private" ] ]
 
   GWLBTunPrivateRTA:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -170,7 +170,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       VpcId: !Ref GWLBTunVPC
-      GroupName: GWLBTun Security
+      GroupName: !Join [ "-", [ !Ref AWS::StackName, "GWLBTun Security" ] ]
       GroupDescription: GWLBTun Security
       SecurityGroupIngress:
         - CidrIp: !GetAtt GWLBTunVPC.CidrBlock
@@ -182,7 +182,7 @@ Resources:
     Properties:
       Tags:
         - Key: Name
-          Value: GWLBTun Internet Gateway
+          Value: !Join [ "-", [ !Ref AWS::StackName, "gwlbtun" ] ]
 
   GWLBTunIGA:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -207,7 +207,7 @@ Resources:
       EnableDnsSupport: true
       Tags:
         - Key: Name
-          Value: Application VPC
+          Value: !Join [ "-", [ !Ref AWS::StackName, "Application VPC" ] ]
 
   ApplicationPrivateSubnet:
     Type: AWS::EC2::Subnet
@@ -217,7 +217,7 @@ Resources:
       VpcId: !Ref ApplicationVPC
       Tags:
         - Key: Name
-          Value: Application Private subnet
+          Value: !Join [ "-", [ !Ref AWS::StackName, "Application private" ] ]
 
   ApplicationPrivateRT:
     Type: AWS::EC2::RouteTable
@@ -225,7 +225,7 @@ Resources:
       VpcId: !Ref ApplicationVPC
       Tags:
         - Key: Name
-          Value: Application Private subnet
+          Value: !Join [ "-", [ !Ref AWS::StackName, "Application private" ] ]
 
   ApplicationPrivateRTA:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -241,7 +241,7 @@ Resources:
       VpcId: !Ref ApplicationVPC
       Tags:
         - Key: Name
-          Value: Application GWLBe subnet
+          Value: !Join [ "-", [ !Ref AWS::StackName, "Application GWLBe" ] ]
 
   ApplicationGWLBeRT:
     Type: AWS::EC2::RouteTable
@@ -249,7 +249,7 @@ Resources:
       VpcId: !Ref ApplicationVPC
       Tags:
         - Key: Name
-          Value: Application GWLBe subnet
+          Value: !Join [ "-", [ !Ref AWS::StackName, "Application GWLBe" ] ]
 
   ApplicationGWLBeRTA:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -265,7 +265,7 @@ Resources:
       VpcId: !Ref ApplicationVPC
       Tags:
         - Key: Name
-          Value: Application NAT subnet
+          Value: !Join [ "-", [ !Ref AWS::StackName, "Application NAT" ] ]
 
   ApplicationNATRT:
     Type: AWS::EC2::RouteTable
@@ -273,7 +273,7 @@ Resources:
       VpcId: !Ref ApplicationVPC
       Tags:
         - Key: Name
-          Value: Application NAT subnet
+          Value: !Join [ "-", [ !Ref AWS::StackName, "Application NAT" ] ]
 
   ApplicationNATRTA:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -300,7 +300,7 @@ Resources:
     Properties:
       Tags:
         - Key: Name
-          Value: Application Internet Gateway
+          Value: !Join [ "-", [ !Ref AWS::StackName, "Application" ] ]
 
   ApplicationIGA:
     Type: AWS::EC2::VPCGatewayAttachment
