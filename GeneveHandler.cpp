@@ -16,6 +16,7 @@
 #include "utils.h"
 #include <arpa/inet.h>
 #include <cstring>
+#include <map>
 #include <net/if.h>     // Needed for IFNAMSIZ define
 
 using namespace std::string_literals;
@@ -34,7 +35,7 @@ using namespace std::string_literals;
  * @param dstPort Destination port of the GENEVE packet
  */
 GwlbData::GwlbData(GenevePacket &gp, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort) :
-        gp(gp), srcAddr(*srcAddr), srcPort(srcPort), dstAddr(*dstAddr), dstPort(dstPort), seenCount(1)
+         srcAddr(*srcAddr), srcPort(srcPort), dstAddr(*dstAddr), dstPort(dstPort), gp(gp), seenCount(1)
 {
     lastSeen = time(nullptr);
 }
@@ -48,8 +49,9 @@ GwlbData::GwlbData(GenevePacket &gp, struct in_addr *srcAddr, uint16_t srcPort, 
  * @param destroyTimeout How long to wait for an endpoint to be idle before calling destroyCallback.
  */
 GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout)
-        : udpRcvr(GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6)),
-          createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)), destroyTimeout(destroyTimeout), healthy(true)
+        : healthy(true),
+          udpRcvr(GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6)),
+          createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)), destroyTimeout(destroyTimeout)
 {
 
 }
@@ -73,8 +75,6 @@ std::string GeneveHandler::check()
 
     // Add to our return string some stats on the tunnels, and mark tunnels for cleanup if they've timed out.
     // Check their cookie caches as well, and purge stale entries.
-    int cookieCount = 0;
-    int purgeCount = 0;
     time_t expireTime = time(nullptr) - GWLB_CACHE_EXPIRE;
 
     for (auto &ti : tunnelIn)
@@ -92,20 +92,80 @@ std::string GeneveHandler::check()
             enisToDelete.push_back(ti.first);
         }
 
-        std::unique_lock cookieULock(*gwlbCookiesMutex[ti.first]);
-        auto it = gwlbCookies[ti.first].begin();
-        while(it != gwlbCookies[ti.first].end())
+        int cookieCount = 0;
+        int purgeCount = 0;
+        std::unique_lock V4cookieULock(*gwlbV4CookiesMutex[ti.first]);
+        auto itV4 = gwlbV4Cookies[ti.first].begin();
+        while(itV4 != gwlbV4Cookies[ti.first].end())
         {
-            if(it->second.lastSeen < expireTime)
+            if(itV4->second.lastSeen < expireTime)
             {
-                it = gwlbCookies[ti.first].erase(it);
+                itV4= gwlbV4Cookies[ti.first].erase(itV4);
                 purgeCount ++;
             } else {
-                it++;
+                itV4++;
                 cookieCount ++;
             }
         }
-        cookieULock.unlock();
+        if(debug >= DEBUG_ON)
+        {
+            std::map<int, int> bs;
+            ret += "  IPv4 flow cache "s + std::to_string(ti.first) + " is size "s + std::to_string(gwlbV4Cookies[ti.first].size()) +
+                   ", bucket count "s + std::to_string(gwlbV4Cookies[ti.first].bucket_count()) +
+                   ", load factor "s + std::to_string(gwlbV4Cookies[ti.first].load_factor()) + "\n"s;
+            for(unsigned long bc=0; bc < gwlbV4Cookies[ti.first].bucket_count(); bc ++)
+            {
+                int s = gwlbV4Cookies[ti.first].bucket_size(bc);
+                if(bs.count(s))
+                    bs[s] = bs[s] + 1;
+                else
+                    bs[s] = 1;
+            }
+            for(auto bsiter = bs.begin(); bsiter != bs.end(); bsiter ++)
+            {
+                ret += "   There are "s + std::to_string(bsiter->second) + " buckets with "s + std::to_string(bsiter->first) +" elements.\n"s;
+            }
+        }
+
+        V4cookieULock.unlock();
+        ret += "IPv4 flow cache now contains "s + std::to_string(cookieCount) + " records - "s + std::to_string(purgeCount) + " were just purged.\n"s;
+
+        cookieCount = 0;
+        purgeCount = 0;
+        std::unique_lock V6cookieULock(*gwlbV6CookiesMutex[ti.first]);
+        auto itV6 = gwlbV6Cookies[ti.first].begin();
+        while(itV6 != gwlbV6Cookies[ti.first].end())
+        {
+            if(itV6->second.lastSeen < expireTime)
+            {
+                itV6 = gwlbV6Cookies[ti.first].erase(itV6);
+                purgeCount ++;
+            } else {
+                itV6++;
+                cookieCount ++;
+            }
+        }
+        if(debug >= DEBUG_ON)
+        {
+            std::map<int, int> bs;
+            ret += "  IPv6 flow cache "s + std::to_string(ti.first) + " is size "s + std::to_string(gwlbV6Cookies[ti.first].size()) +
+                   ", bucket count "s + std::to_string(gwlbV6Cookies[ti.first].bucket_count()) +
+                   ", load factor "s + std::to_string(gwlbV6Cookies[ti.first].load_factor()) + "\n"s;
+            for(unsigned long bc=0; bc < gwlbV6Cookies[ti.first].bucket_count(); bc ++)
+            {
+                int s = gwlbV6Cookies[ti.first].bucket_size(bc);
+                if(bs.count(s))
+                    bs[s] = bs[s] + 1;
+                else
+                    bs[s] = 1;
+            }
+            for(auto bsiter = bs.begin(); bsiter != bs.end(); bsiter ++)
+            {
+                ret += "   There are "s + std::to_string(bsiter->second) + " buckets with "s + std::to_string(bsiter->first) +" elements.\n"s;
+            }
+        }
+        V6cookieULock.unlock();
+        ret += "IPv6 flow cache now contains "s + std::to_string(cookieCount) + " records - "s + std::to_string(purgeCount) + " were just purged.\n"s;
     }
 
     for (auto &eni : enisToDelete)
@@ -115,8 +175,6 @@ std::string GeneveHandler::check()
         tunnelIn.erase(eni);
         tunnelOut.erase(eni);
     }
-
-    ret += "Flow Cache contains "s + std::to_string(cookieCount) + " records - "s + std::to_string(purgeCount) + " were just purged."s;
 
     return ret;
 }
@@ -138,11 +196,10 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
     {
         *debugout << currentTime() << ": GWLB : Received a packet of " << pktlen << " bytes from " << inet_ntoa(*srcAddr) << " port " << srcPort;
         *debugout << " sent to " << inet_ntoa(*dstAddr) << " port " << dstPort << std::endl;
-        if(debug >= DEBUG_VERBOSE) hexDump(*hexout, pkt, pktlen, true, currentTime() + "GWLB Packet: ");
+        if(debug >= DEBUG_VERBOSE) hexDump(*hexout, pkt, pktlen, true, currentTime() + ": GWLB Packet: ");
     }
     try {
         auto gp = GenevePacket(pkt, pktlen);
-        auto ph = PacketHeader(pkt + gp.headerLen, pktlen - gp.headerLen);
         auto gd = GwlbData(gp, srcAddr, srcPort, dstAddr, dstPort);
 
         // The GenevePacket class does sanity checks to ensure this was a Geneve packet. Verify the result of those checks.
@@ -169,12 +226,16 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
             snprintf(devnamein, IFNAMSIZ, "gwi-%s", toBase60(gp.gwlbeEniId).c_str());
             snprintf(devnameout, IFNAMSIZ, "gwo-%s", toBase60(gp.gwlbeEniId).c_str());
             std::unique_lock eniULock(eniIdLock);
+            // Create our seen-flows data (cookies) for this ENI, along with a mutex for multithread data protection.
+            gwlbV4CookiesMutex.emplace(gp.gwlbeEniId, new std::shared_mutex);
+            gwlbV4Cookies.emplace(gp.gwlbeEniId, std::unordered_map<PacketHeaderV4, GwlbData>());
+            gwlbV6CookiesMutex.emplace(gp.gwlbeEniId, new std::shared_mutex);
+            gwlbV6Cookies.emplace(gp.gwlbeEniId, std::unordered_map<PacketHeaderV6, GwlbData>());
+
+            // Now create the tunnels
             tunnelIn.emplace(gp.gwlbeEniId, new TunInterface(devnamein, GWLB_MTU, std::bind(&GeneveHandler::tunReceiverCallback, this, gp.gwlbeEniId, std::placeholders::_1, std::placeholders::_2)));
             tunnelOut.emplace(gp.gwlbeEniId, new TunInterface(devnameout, GWLB_MTU, std::bind(&GeneveHandler::tunReceiverCallback, this, gp.gwlbeEniId, std::placeholders::_1, std::placeholders::_2)));
 
-            // Create our seen-flows data (cookies) for this ENI, along with a mutex for multithread data protection.
-            gwlbCookiesMutex.emplace(gp.gwlbeEniId, new std::shared_mutex);
-            gwlbCookies.emplace(gp.gwlbeEniId, std::unordered_map<PacketHeader, GwlbData, PacketHeaderHash>());
             eniULock.unlock();
             if(debug) *debugout << currentTime() << ": GWLB : New ENI ID " << std::hex << gp.gwlbeEniId << std::dec << " detected.  New tunnel interfaces " << devnamein << " and " << devnameout << " created." << std::endl;
 
@@ -182,44 +243,97 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
             createCallback(devnamein, devnameout, gp.gwlbeEniId);
         }
 
-        // Is this a new flow?
-        std::shared_lock cookieLock(*gwlbCookiesMutex[gp.gwlbeEniId]);
-        auto foundCookie = gwlbCookies[gp.gwlbeEniId].find(ph);
-        cookieLock.unlock();
-
-        if (foundCookie == gwlbCookies[gp.gwlbeEniId].end()) {
-            // Yes. Add its seen data so we can add the header back on when this same flow leaves.
-            std::unique_lock cookieULock(*gwlbCookiesMutex[gp.gwlbeEniId]);
-            gwlbCookies[gp.gwlbeEniId].insert(std::pair<PacketHeader, GwlbData>(ph, gd));
-            cookieULock.unlock();
-            if(debug) *debugout << currentTime() << ": GWLB : Flow " << ph << " added:" << gp << std::endl;
-        } else {
-            // Verify the flow cookie hasn't changed. If it has, replace this entry.
-            if(memcmp(&foundCookie->second.gp.header.front(), &gd.gp.header.front(), foundCookie->second.gp.headerLen))
+        if( (pktlen - gp.headerLen) > sizeof(struct ip) )
+        {
+            struct ip *iph = (struct ip *)(pkt + gp.headerLen);
+            if(iph->ip_v == 4)
             {
-                std::unique_lock cookieULock(*gwlbCookiesMutex[gp.gwlbeEniId]);
-                gwlbCookies[gp.gwlbeEniId].erase(foundCookie);
-                gwlbCookies[gp.gwlbeEniId].insert(std::pair<PacketHeader, GwlbData>(ph, gd));
-                cookieULock.unlock();
-                if(debug) *debugout << currentTime() << ": GWLB : Flow " << ph << " replaced:" << gp << std::endl;
+                auto ph = PacketHeaderV4(pkt + gp.headerLen, pktlen - gp.headerLen);
+
+                // Is this a new flow?
+                std::shared_lock cookieLock(*gwlbV4CookiesMutex[gp.gwlbeEniId]);
+                auto foundCookie = gwlbV4Cookies[gp.gwlbeEniId].find(ph);
+                cookieLock.unlock();
+
+                if (foundCookie == gwlbV4Cookies[gp.gwlbeEniId].end()) {
+                    // Yes. Add its seen data so we can add the header back on when this same flow leaves.
+                    std::unique_lock cookieULock(*gwlbV4CookiesMutex[gp.gwlbeEniId]);
+                    // Add forward direction
+                    gwlbV4Cookies[gp.gwlbeEniId].insert(std::pair<PacketHeaderV4, GwlbData>(ph, gd));
+                    // Add reverse direction if needed
+#ifndef HASH_IS_SYMMETRICAL
+                    gwlbV4Cookies[gp.gwlbeEniId].insert(std::pair<PacketHeaderV4, GwlbData>(ph.reverse(), gd));
+#endif
+                    cookieULock.unlock();
+
+                    if(debug) *debugout << currentTime() << ": GWLB : IPv4 flow " << ph << " added:" << gp << std::endl;
+                } else {
+                    // Verify the flow cookie hasn't changed. If it has, replace this entry.
+                    if(memcmp(&foundCookie->second.gp.header.front(), &gd.gp.header.front(), foundCookie->second.gp.headerLen))
+                    {
+                        std::unique_lock cookieULock(*gwlbV4CookiesMutex[gp.gwlbeEniId]);
+                        gwlbV4Cookies[gp.gwlbeEniId].erase(foundCookie);
+                        gwlbV4Cookies[gp.gwlbeEniId].insert(std::pair<PacketHeaderV4, GwlbData>(ph, gd));
+                        cookieULock.unlock();
+                        if(debug) *debugout << currentTime() << ": GWLB : IPv4 flow " << ph << " replaced:" << gp << std::endl;
+                    } else {
+                        foundCookie->second.seenCount ++;
+                        foundCookie->second.lastSeen = time(nullptr);
+                        if(debug) *debugout << currentTime() << ": GWLB : IPv4 flow " << ph << " exists. Seen " << foundCookie->second.seenCount << " times." << std::endl;
+                    }
+                }
+                // Route the decap'ed packet to our tun interface.
+                if(pktlen > gp.headerLen)
+                    tunnelIn[gp.gwlbeEniId]->writePacket(pkt + gp.headerLen, pktlen - gp.headerLen);
+            } else if(iph->ip_v == 6) {
+                auto ph = PacketHeaderV6(pkt + gp.headerLen, pktlen - gp.headerLen);
+
+                // Is this a new flow?
+                std::shared_lock cookieLock(*gwlbV6CookiesMutex[gp.gwlbeEniId]);
+                auto foundCookie = gwlbV6Cookies[gp.gwlbeEniId].find(ph);
+                cookieLock.unlock();
+
+                if (foundCookie == gwlbV6Cookies[gp.gwlbeEniId].end()) {
+                    // Yes. Add its seen data so we can add the header back on when this same flow leaves.
+                    std::unique_lock cookieULock(*gwlbV6CookiesMutex[gp.gwlbeEniId]);
+                    gwlbV6Cookies[gp.gwlbeEniId].insert(std::pair<PacketHeaderV6, GwlbData>(ph, gd));
+                    cookieULock.unlock();
+                    if(debug) *debugout << currentTime() << ": GWLB : IPv6 flow " << ph << " added:" << gp << std::endl;
+                } else {
+                    // Verify the flow cookie hasn't changed. If it has, replace this entry.
+                    if(memcmp(&foundCookie->second.gp.header.front(), &gd.gp.header.front(), foundCookie->second.gp.headerLen))
+                    {
+                        std::unique_lock cookieULock(*gwlbV6CookiesMutex[gp.gwlbeEniId]);
+                        gwlbV6Cookies[gp.gwlbeEniId].erase(foundCookie);
+                        // Add this flow
+                        gwlbV6Cookies[gp.gwlbeEniId].insert(std::pair<PacketHeaderV6, GwlbData>(ph, gd));
+                        // Add reverse direction if needed
+#ifndef HASH_IS_SYMMETRICAL
+                        gwlbV6Cookies[gp.gwlbeEniId].insert(std::pair<PacketHeaderV6, GwlbData>(ph.reverse(), gd));
+#endif
+                        cookieULock.unlock();
+                        if(debug) *debugout << currentTime() << ": GWLB : IPv6 flow " << ph << " replaced:" << gp << std::endl;
+                    } else {
+                        foundCookie->second.seenCount ++;
+                        foundCookie->second.lastSeen = time(nullptr);
+                        if(debug) *debugout << currentTime() << ": GWLB : IPv6 flow " << ph << " exists. Seen " << foundCookie->second.seenCount << " times." << std::endl;
+                    }
+                }
+                // Route the decap'ed packet to our tun interface.
+                if(pktlen > gp.headerLen)
+                    tunnelIn[gp.gwlbeEniId]->writePacket(pkt + gp.headerLen, pktlen - gp.headerLen);
             } else {
-                foundCookie->second.seenCount ++;
-                foundCookie->second.lastSeen = time(nullptr);
-                if(debug) *debugout << currentTime() << ": GWLB : Flow exists. Seen " << foundCookie->second.seenCount << " times." << std::endl;
+                if(debug) *debugout << currentTime() << ": GWLB : Got a strange IP protocol version - " << std::to_string(iph->ip_v) << " at offset " << std::to_string(gp.headerLen) << ". Dropping packet." << std::endl;
             }
         }
-
-        // Route the decap'ed packet to our tun interface.
-        if(pktlen > gp.headerLen)
-            tunnelIn[gp.gwlbeEniId]->writePacket(pkt + gp.headerLen, pktlen - gp.headerLen);
-    } catch (...) {
-        // Something was bad - generally the PacketHeader was not OK. Ignore this packet.
+    } catch(std::invalid_argument& err) {
+        if(debug) *debugout << currentTime() << ": GWLB : Packet processor has a malformed packet: " << err.what() << std::endl;
         return;
     }
 }
 
 /**
- * Shut down the GeneveHandler. Call all the tunnel destructors first, before letting normal object cleanup occur.
+ * Shut down the GeneveHandler. Call all the tunnel destructors first, then shut down our threads.
  */
 GeneveHandler::~GeneveHandler()
 {
@@ -227,6 +341,9 @@ GeneveHandler::~GeneveHandler()
     {
         destroyCallback(ti.second->devname, tunnelOut[ti.first]->devname, ti.first);
     }
+    udpRcvr.shutdown();
+    tunnelIn.clear();
+    tunnelOut.clear();
 }
 
 /**
@@ -241,44 +358,82 @@ GeneveHandler::~GeneveHandler()
 void GeneveHandler::tunReceiverCallback(uint64_t eniId, unsigned char *pktbuf, ssize_t pktlen)
 {
     if(debug) *debugout << currentTime() << ": Tun : Received a packet of " << pktlen << " bytes for ENI Id:" << std::hex << eniId << std::dec << std::endl;
-    if(debug >= DEBUG_VERBOSE) hexDump(*hexout, pktbuf, pktlen, true, "Tun Packet: ");
+    if(debug >= DEBUG_VERBOSE) hexDump(*hexout, pktbuf, pktlen, true, currentTime() + ": Tun Packet: ");
 
-    // Ignore packets that cannot contain at least an IPv4 header (20 bytes), and anything besides IPv4 packets.
-    // Linux sends out IPv6 Router Solicitation and other things on occasion.
-    if( (pktlen < 20) || ((pktbuf[0] & 0xF0) >> 4) != 4) {
-        if(debug) *debugout << currentTime() << ": Tun : Packet is not an IPv4 packet, ignoring." << std::endl;
+    // Ignore packets that are not IPv4 or IPv6, or aren't at least long enough to have those sized headers.
+    if( pktlen < 20 )
+    {
+        if(debug) *debugout << currentTime() << ": Tun : Packet is not long enough to have an IP header, ignoring." << std::endl;
         return;
     }
+    try
+    {
+        switch( (pktbuf[0] & 0xF0) >> 4)
+        {
+            case 4:
+            {
+                auto ph = PacketHeaderV4(pktbuf, pktlen);
 
-    // See if we have a matching flow record.  If we don't, or the packet is bad, drop this packet.
-    try {
-        auto ph = PacketHeader(pktbuf, pktlen);
+                std::shared_lock cookieLock(*gwlbV4CookiesMutex[eniId]);
+                auto got = gwlbV4Cookies[eniId].find(ph);
+                cookieLock.unlock();
+                if (got == gwlbV4Cookies[eniId].end()) {
+                    if(debug) *debugout << currentTime() << ": Tun : Flow " << ph << " has not been seen coming in from GWLB - dropping.  (Remember - GWLB is for inline inspection only - you cannot source new flows from this device into it.)" << std::endl;
+                } else {
+                    // Build the packet to send back to GWLB.
+                    // Following as per https://aws.amazon.com/blogs/networking-and-content-delivery/integrate-your-custom-logic-or-appliance-with-aws-gateway-load-balancer/
+                    unsigned char *genevePkt = new unsigned char[pktlen + got->second.gp.headerLen];
 
-        std::shared_lock cookieLock(*gwlbCookiesMutex[eniId]);
-        auto got = gwlbCookies[eniId].find(ph);
-        cookieLock.unlock();
-        if (got == gwlbCookies[eniId].end()) {
-            if(debug) *debugout << currentTime() << ": Tun : Flow " << ph << " has not been seen coming in from GWLB - dropping.  (Remember - GWLB is for inline inspection only - you cannot source new flows from this device into it.)" << std::endl;
-        } else {
-            // Build the packet to send back to GWLB.
-            // Following as per https://aws.amazon.com/blogs/networking-and-content-delivery/integrate-your-custom-logic-or-appliance-with-aws-gateway-load-balancer/
-            unsigned char *genevePkt = new unsigned char[pktlen + got->second.gp.headerLen];
+                    if(debug) *debugout << currentTime() << ": Tun : Flow " << ph << " recognized - forwarding to GWLB with header " << got->second.gp << std::endl;
 
-            if(debug) *debugout << currentTime() << ": Tun : Flow " << ph << " recognized - forwarding to GWLB with header " << got->second.gp << std::endl;
+                    // Encapsulate this packet with the original Geneve header
+                    memcpy(genevePkt, &got->second.gp.header.front(), got->second.gp.headerLen);
+                    // Copy the packet in after the Geneve header.
+                    memcpy(genevePkt + got->second.gp.headerLen, pktbuf, pktlen);
+                    // Swap source and destination IP addresses, but preserve ports, and send back to GWLB.
+                    sendUdp(got->second.dstAddr, got->second.srcPort, got->second.srcAddr, got->second.dstPort, genevePkt,
+                            pktlen + got->second.gp.headerLen);
 
-            // Encapsulate this packet with the original Geneve header
-            memcpy(genevePkt, &got->second.gp.header.front(), got->second.gp.headerLen);
-            // Copy the packet in after the Geneve header.
-            memcpy(genevePkt + got->second.gp.headerLen, pktbuf, pktlen);
-            // Swap source and destination IP addresses, but preserve ports, and send back to GWLB.
-            sendUdp(got->second.dstAddr, got->second.srcPort, got->second.srcAddr, got->second.dstPort, genevePkt,
-                    pktlen + got->second.gp.headerLen);
+                    delete [] genevePkt;
+                }
+                return;
+            }
+            case 6:
+            {
+                auto ph = PacketHeaderV6(pktbuf, pktlen);
 
-            delete [] genevePkt;
+                std::shared_lock cookieLock(*gwlbV6CookiesMutex[eniId]);
+                auto got = gwlbV6Cookies[eniId].find(ph);
+                cookieLock.unlock();
+                if (got == gwlbV6Cookies[eniId].end()) {
+                    if(debug) *debugout << currentTime() << ": Tun : Flow " << ph << " has not been seen coming in from GWLB - dropping.  (Remember - GWLB is for inline inspection only - you cannot source new flows from this device into it.)" << std::endl;
+                } else {
+                    // Build the packet to send back to GWLB.
+                    // Following as per https://aws.amazon.com/blogs/networking-and-content-delivery/integrate-your-custom-logic-or-appliance-with-aws-gateway-load-balancer/
+                    unsigned char *genevePkt = new unsigned char[pktlen + got->second.gp.headerLen];
+
+                    if(debug) *debugout << currentTime() << ": Tun : Flow " << ph << " recognized - forwarding to GWLB with header " << got->second.gp << std::endl;
+
+                    // Encapsulate this packet with the original Geneve header
+                    memcpy(genevePkt, &got->second.gp.header.front(), got->second.gp.headerLen);
+                    // Copy the packet in after the Geneve header.
+                    memcpy(genevePkt + got->second.gp.headerLen, pktbuf, pktlen);
+                    // Swap source and destination IP addresses, but preserve ports, and send back to GWLB.
+                    sendUdp(got->second.dstAddr, got->second.srcPort, got->second.srcAddr, got->second.dstPort, genevePkt,
+                            pktlen + got->second.gp.headerLen);
+
+                    delete [] genevePkt;
+                }
+                return;
+            }
+            default:
+            {
+                if(debug) *debugout << currentTime() << ": Tun : Received a packet that wasn't IPv4 or IPv6. Ignoring." << std::endl;
+                return;
+            }
         }
-    } catch(...) {
-        // PacketHeader failed to parse.
-        if(debug) *debugout << currentTime() << ": Tun : Received a malformed packet, ignoring." << std::endl;
+    } catch(std::invalid_argument& err) {
+        if(debug) *debugout << currentTime() << ": Tun : Packet processor has a malformed packet: " << err.what() << std::endl;
         return;
     }
 }

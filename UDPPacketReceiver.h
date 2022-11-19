@@ -16,6 +16,7 @@ public:
 
     bool healthCheck();
     std::string status();
+    void shutdown();
 
     std::atomic<std::chrono::steady_clock::time_point> lastPacket;
     std::atomic<uint64_t> pktsIn, bytesIn;

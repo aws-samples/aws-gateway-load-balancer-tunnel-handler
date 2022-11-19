@@ -52,8 +52,8 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
 
     // This application has no use for the O or C bits.  Reserved must be ignored.
 
-    // GWLB uses L3 IPv4 encapsulation - ethertype 0x0800. Make sure that's what is here.
-    if(be16toh(*(uint16_t *)&pktBuf[2]) != 0x0800)
+    // GWLB uses L3 IPv4 encapsulation - ethertype 0x0800, or L3 IPv6 encapsulation - 0x86dd. Make sure that's what is here.
+    if( (be16toh(*(uint16_t *)&pktBuf[2]) != ETH_P_IP) && (be16toh(*(uint16_t *)&pktBuf[2]) != ETH_P_IPV6))
     {
         status = GP_STATUS_BAD_ETHERTYPE;
         return;
@@ -72,7 +72,8 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
         return;
     }
 
-    // Work through the packet buffer, option-by-option, moving pktPtr as needed.
+    // Work through the packet buffer, option-by-option, moving pktPtr as needed. We're expecting 3, so reserve that.
+    geneveOptions.reserve(3);
     pktPtr = &pktBuf[8];
     struct GeneveOption go;
     while(pktPtr < &pktBuf[8 + optLen])

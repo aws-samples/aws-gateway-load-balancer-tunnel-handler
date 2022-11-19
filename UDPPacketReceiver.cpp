@@ -25,7 +25,7 @@ using namespace std::string_literals;
  * @param recvDispatcher Function to callback to on each packet received.
  */
 UDPPacketReceiver::UDPPacketReceiver(uint16_t portNumber, udpCallback recvDispatcher)
-        : recvDispatcher(std::move(recvDispatcher)), shutdownRequested(false), portNumber(portNumber), lastPacket(std::chrono::steady_clock::now()), pktsIn(0), bytesIn(0)
+        : lastPacket(std::chrono::steady_clock::now()), pktsIn(0), bytesIn(0), shutdownRequested(false), portNumber(portNumber), recvDispatcher(std::move(recvDispatcher))
 {
     int yes = 1;
     struct sockaddr_in address;
@@ -96,7 +96,7 @@ int UDPPacketReceiver::recvThreadFunction()
         if(FD_ISSET(sock, &readfds))
         {
             msgLen = recvmsg(sock, &mh, MSG_DONTWAIT);
-            while(msgLen > 0) {
+            while(msgLen > 0 && !shutdownRequested) {
                 if(src_addr.ss_family == AF_INET)
                 {
                     // Cycle through the control data to get the IP address this was sent to, then call dispatch.
@@ -145,19 +145,26 @@ bool UDPPacketReceiver::healthCheck() {
 }
 
 /**
- * Destructor. Signals the thread to shut down, waits for that to finish, then closes the socket.
+ * Shutdown the packet receiver.
  */
-UDPPacketReceiver::~UDPPacketReceiver() {
+void UDPPacketReceiver::shutdown() {
     shutdownRequested = true;
     // The std::async threads will see that boolean change within 1 second, then exit, which allows the
     // async object to finish its destruction.
     auto status = recvThread.wait_for(std::chrono::seconds(2));
     while(status == std::future_status::timeout)
     {
-        std::cerr << currentTime() << "UDP receiver thread has not yet shutdown - waiting more." << std::endl;
+        std::cerr << currentTime() << ": UDP receiver thread has not yet shutdown - waiting more." << std::endl;
         status = recvThread.wait_for(std::chrono::seconds(2));
     }
     close(sock);
+}
+
+/**
+ * Destructor. Signals the thread to shut down, waits for that to finish, then closes the socket.
+ */
+UDPPacketReceiver::~UDPPacketReceiver() {
+    shutdown();
 }
 
 /**

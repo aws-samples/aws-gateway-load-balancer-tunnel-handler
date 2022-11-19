@@ -12,7 +12,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <string>
-
+#include <cstring>
 
 using namespace std::string_literals;
 
@@ -27,7 +27,7 @@ using namespace std::string_literals;
  * @return Returns the output stream back. Side effect: The output stream has had the hex dump pushed into it.
  */
 std::ostream& hexDump(std::ostream& os, const void *buffer,
-                      std::size_t bufsize, bool showPrintableChars, std::string prefix)
+                      std::size_t bufsize, bool showPrintableChars, const std::string& prefix)
 {
     if (buffer == nullptr) {
         return os;
@@ -46,9 +46,9 @@ std::ostream& hexDump(std::ostream& os, const void *buffer,
             bzero(hexBuf, 140);
             bzero(printBuf, 36);
             if(showPrintableChars) strcpy(printBuf, " | ");
-            sprintf(hexBuf, "%04zx: ", offset);
+            snprintf(hexBuf, 7, "%04zx: ", offset);
         }
-        sprintf(&hexBuf[5+((offset % 32)*3)], " %02x", cBuffer[offset]);
+        snprintf(&hexBuf[5+((offset % 32)*3)], 4, " %02x", cBuffer[offset]);
         if(showPrintableChars)
             printBuf[3 + (offset % 32)] = (isprint(cBuffer[offset]))?cBuffer[offset]:'.';
     }
@@ -66,14 +66,14 @@ std::ostream& hexDump(std::ostream& os, const void *buffer,
  * @param ... Parameters for the fmt_str
  * @return A std::string of the formatted output
  */
-std::string stringFormat(const std::string fmt_str, ...) {
+std::string stringFormat(const std::string& fmt_str, ...) {
     int final_n, n = ((int)fmt_str.size()) * 2; /* Reserve two times as much as the length of the fmt_str */
     std::unique_ptr<char[]> formatted;
     va_list ap;
     while(true) {
         formatted.reset(new char[n]); /* Wrap the plain char array into the unique_ptr */
         strcpy(&formatted[0], fmt_str.c_str());
-        va_start(ap, fmt_str);
+        va_start(ap, &fmt_str);
         final_n = vsnprintf(&formatted[0], n, fmt_str.c_str(), ap);
         va_end(ap);
         if (final_n < 0 || final_n >= n)
@@ -83,6 +83,7 @@ std::string stringFormat(const std::string fmt_str, ...) {
     }
     return std::string(formatted.get());
 }
+
 
 /**
  * Send a UDP packet, with control over the source and destination.
@@ -173,12 +174,14 @@ std::string timepointDelta(std::chrono::steady_clock::time_point t1, std::chrono
  */
 std::string currentTime()
 {
-    char tempbuf[64];
     struct tm localtm;
+    auto timepoint = std::chrono::system_clock::now();
+    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(timepoint.time_since_epoch()).count() % 1000;
     std::time_t cur_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     localtime_r(&cur_time, &localtm);
-    strftime(tempbuf, 64, "%c", &localtm);
-    return std::string(tempbuf);
+    std::stringstream ss;
+    ss << std::put_time(&localtm, "%F %T") << "."s << std::setw(3) << std::setfill('0') << millis;
+    return ss.str();
 }
 
 /**

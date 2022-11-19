@@ -102,8 +102,10 @@ void printHelp(char *progname)
             "  -x         Enable dumping the hex payload of packets being processed.\n"
             "\n"
             "---------------------------------------------------------------------------------------------------------\n"
-            "Tunnel command arguments:\n"
-            "The commands will be called with the following arguments:\n"
+            "Hook scripts arguments:\n"
+            "These arguments are provided when gwlbtun calls the hook scripts (the -c <FILE> and/or -r <FILE> command options).\n"
+            "On gwlbtun startup, it will automatically create gwi-<X> and gwo-<X> interfaces upon seeing the first packet from a specific GWLBE, and the hook scripts are invoked when interfaces are created or destroyed. You should at least disable rpf_filter for the gwi-<X> tunnel interface with the hook scripts.\n"
+            "The hook scripts will be called with the following arguments:\n"
             "1: The string 'CREATE' or 'DESTROY', depending on which operation is occurring.\n"
             "2: The interface name of the ingress interface (gwi-<X>).\n"
             "3: The interface name of the egress interface (gwo-<X>).  Packets can be sent out via in the ingress\n"
@@ -216,7 +218,7 @@ int main(int argc, char *argv[])
             struct sockaddr_in6 from;
             socklen_t fromlen = sizeof(from);
             hsClient = accept(healthSocket, (struct sockaddr *)&from, &fromlen);
-            *debugout << "Processing a health check client for " << sockaddrToName((struct sockaddr *)&from) << std::endl;
+            *debugout << currentTime() << ": Processing a health check client for " << sockaddrToName((struct sockaddr *)&from) << std::endl;
             performHealthCheck(detailedHealth, gh, hsClient);
             close(hsClient);
             ticksSinceCheck = 60;

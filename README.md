@@ -11,7 +11,7 @@ sudo yum groupinstall "Development Tools"
 sudo yum install cmake3
 ```
 
-In the directory with the source code, do ```cmake3 .; make``` to build.
+In the directory with the source code, do ```cmake3 .; make``` to build. This code works with both Intel and Graviton-based architectures.
 
 
 ## Usage
@@ -32,8 +32,10 @@ Example: ./gwlbtun
   -x         Enable dumping the hex payload of packets being processed.
 
 ---------------------------------------------------------------------------------------------------------
-Tunnel command arguments:
-The commands will be called with the following arguments:
+Hook scripts arguments:
+These arguments are provided when gwlbtun calls the hook scripts (the -c <FILE> and/or -r <FILE> command options).
+On gwlbtun startup, it will automatically create gwi-<X> and gwo-<X> interfaces upon seeing the first packet from a specific GWLBE, and the hook scripts are invoked when interfaces are created or destroyed. You should at least disable rpf_filter for the gwi-<X> tunnel interface with the hook scripts.
+The hook scripts will be called with the following arguments:
 1: The string 'CREATE' or 'DESTROY', depending on which operation is occurring.
 2: The interface name of the ingress interface (gwi-<X>).
 3: The interface name of the egress interface (gwo-<X>).  Packets can be sent out via in the ingress

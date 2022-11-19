@@ -32,7 +32,7 @@ using namespace std::string_literals;
  * @param recvDispatcher Function the thread should callback to on packets received.
  */
 TunInterface::TunInterface(std::string devname, int mtu, tunCallback recvDispatcher)
-: recvDispatcher(std::move(recvDispatcher)),lastPacket(std::chrono::steady_clock::now()),pktsIn(0),pktsOut(0),bytesIn(0),bytesOut(0), shutdownRequested(false)
+: lastPacket(std::chrono::steady_clock::now()),pktsIn(0),pktsOut(0),bytesIn(0),bytesOut(0), shutdownRequested(false), recvDispatcher(std::move(recvDispatcher))
 {
     struct ifreq ifr;
 
@@ -122,7 +122,7 @@ TunInterface::~TunInterface() {
     auto status = recvThread.wait_for(std::chrono::seconds(2));
     while(status == std::future_status::timeout)
     {
-        std::cerr << currentTime() << "Tunnel thread has not yet shutdown - waiting more." << std::endl;
+        std::cerr << currentTime() << ": Tunnel thread has not yet shutdown - waiting more." << std::endl;
         status = recvThread.wait_for(std::chrono::seconds(2));
     }
     close(fd);
