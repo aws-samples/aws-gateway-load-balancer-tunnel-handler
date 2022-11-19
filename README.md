@@ -49,7 +49,7 @@ device name limit).
 ## Source code layout
 main.cpp contains the start of the code, but primarily interfaces with GeneveHandler, defined in GeneveHandler.cpp. 
 That class instantiates UDPPacketReceiver and TunInterface as needed, and generally manages the entire packet handling flow. 
-GenevePacket and PacketHeader handle parsing and validating GENEVE packets and IP packets respectively, and are called by GeneveHandler as needed.
+GenevePacket, PacketHeaderV4, and PacketHeaderV6 handle parsing and validating GENEVE packets, IPv4 packets, and IPv6 packets respectively, and are called by GeneveHandler as needed.
 
 ## Security
 
