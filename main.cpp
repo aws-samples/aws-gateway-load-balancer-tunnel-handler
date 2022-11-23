@@ -34,11 +34,11 @@ volatile sig_atomic_t keepRunning = 1;
  */
 void newInterfaceCallback(std::string ingressInt, const std::string egressInt, uint64_t eniId)
 {
-    std::cout << "New interface " << ingressInt << " and " << egressInt << " for ENI ID " << std::hex << eniId << std::dec << " created." << std::endl;
+    std::cout << "New interface " << ingressInt << " and " << egressInt << " for ENI ID " << std::hex << std::setw(17) << std::setfill('0') << eniId << std::dec << " created." << std::endl;
     if(newCmd.length() > 0)
     {
         std::stringstream ss;
-        ss << newCmd << " CREATE " << ingressInt << " " << egressInt << " " << std::hex << eniId << std::dec;
+        ss << newCmd << " CREATE " << ingressInt << " " << egressInt << " " << std::hex << std::setw(17) << std::setfill('0') << eniId << std::dec;
         system(ss.str().c_str());
     }
 }
@@ -51,11 +51,11 @@ void newInterfaceCallback(std::string ingressInt, const std::string egressInt, u
  */
 void deleteInterfaceCallback(std::string ingressInt, const std::string egressInt, uint64_t eniId)
 {
-    std::cout << "Removing interface " << ingressInt << " and " << egressInt << " for ENI ID " << std::hex << eniId << std::dec << "." << std::endl;
+    std::cout << "Removing interface " << ingressInt << " and " << egressInt << " for ENI ID " << std::hex << std::setw(17) << std::setfill('0') << eniId << std::dec << "." << std::endl;
     if(delCmd.length() > 0)
     {
         std::stringstream ss;
-        ss << delCmd << " DESTROY " << ingressInt << " " << egressInt << " " << std::hex << eniId << std::dec;
+        ss << delCmd << " DESTROY " << ingressInt << " " << egressInt << " " << std::hex << std::setw(17) << std::setfill('0') << eniId << std::dec;
         system(ss.str().c_str());
     }
 }
