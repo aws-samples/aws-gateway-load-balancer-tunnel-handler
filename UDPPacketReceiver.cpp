@@ -14,21 +14,36 @@
 #include "UDPPacketReceiver.h"
 #include <unistd.h>
 #include <iostream>
+#include <utility>
 #include "utils.h"
 
 using namespace std::string_literals;
 
 /**
- * Constructor. Open a UDP receiver and starts the thread for it.
+ * Default constructor for array initialization.
+ */
+UDPPacketReceiver::UDPPacketReceiver()
+        : setupCalled(false), lastPacket(std::chrono::steady_clock::now()), pktsIn(0), bytesIn(0), shutdownRequested(false), portNumber(0), recvDispatcher(nullptr)
+{
+    // Empty init. Need to set port and receive function with a setup() call.
+}
+
+/**
+ * Setup the receiver. Open a UDP receiver and starts the thread for it.
  *
  * @param portNumber UDP port number to listen to.
  * @param recvDispatcher Function to callback to on each packet received.
  */
-UDPPacketReceiver::UDPPacketReceiver(uint16_t portNumber, udpCallback recvDispatcher)
-        : lastPacket(std::chrono::steady_clock::now()), pktsIn(0), bytesIn(0), shutdownRequested(false), portNumber(portNumber), recvDispatcher(std::move(recvDispatcher))
+void UDPPacketReceiver::setup(int threadNumberParam, int coreNumberParam, uint16_t portNumberParam, udpCallback recvDispatcherParam)
 {
     int yes = 1;
     struct sockaddr_in address;
+
+    threadNumber = threadNumberParam;
+    coreNumber = coreNumberParam;
+    recvDispatcher = std::move(recvDispatcherParam);
+    portNumber = portNumberParam;
+    setupCalled = true;
 
     if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) == 0)
         throw std::system_error(errno, std::generic_category(), "Socket creation failed");
@@ -72,6 +87,19 @@ int UDPPacketReceiver::recvThreadFunction()
 
     pthread_setname_np(pthread_self(), "gwlbtun (UDP)");
 
+    // If a specific core was requested, attempt to set affinity.
+    if(coreNumber != -1)
+    {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(coreNumber, &cpuset);
+        int s = pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+        if(s != 0)
+        {
+            std::cerr << "Unable to set UDP thread CPU affinity to core "s << std::to_string(coreNumber) << ": "s << std::error_code{errno, std::generic_category()}.message() << ". Thread continuing to run with affinity unset."s << std::endl;
+        }
+    }
+
     iov[0].iov_base = pktbuf;
     iov[0].iov_len = 65534;
     mh.msg_name = &src_addr;
@@ -114,7 +142,7 @@ int UDPPacketReceiver::recvThreadFunction()
                                 recvDispatcher(pktbuf, msgLen, &src_addr4->sin_addr, be16toh(src_addr4->sin_port), &ipi->ipi_spec_dst, portNumber);
                             }
                             catch (std::exception& e) {
-                                std::cerr << currentTime() << "UDP packet dispatch function failed: " << e.what() << std::endl;
+                                std::cerr << currentTime() << ": UDP packet dispatch function failed: " << e.what() << std::endl;
                             }
                         }
                         cmhdr = CMSG_NXTHDR(&mh, cmhdr);
@@ -136,12 +164,16 @@ int UDPPacketReceiver::recvThreadFunction()
  * @return true if the thread is still alive, false otherwise.
  */
 bool UDPPacketReceiver::healthCheck() {
-    auto status = recvThread.wait_for(std::chrono::seconds(0));
-    if(status != std::future_status::timeout)
+    if(recvThread.valid())
     {
-        return false;
+        auto status = recvThread.wait_for(std::chrono::seconds(0));
+        if(status != std::future_status::timeout)
+        {
+            return false;
+        }
+        return true;
     }
-    return true;
+    return false;
 }
 
 /**
@@ -151,11 +183,14 @@ void UDPPacketReceiver::shutdown() {
     shutdownRequested = true;
     // The std::async threads will see that boolean change within 1 second, then exit, which allows the
     // async object to finish its destruction.
-    auto status = recvThread.wait_for(std::chrono::seconds(2));
-    while(status == std::future_status::timeout)
+    if(recvThread.valid())
     {
-        std::cerr << currentTime() << ": UDP receiver thread has not yet shutdown - waiting more." << std::endl;
-        status = recvThread.wait_for(std::chrono::seconds(2));
+        auto status = recvThread.wait_for(std::chrono::seconds(2));
+        while(status == std::future_status::timeout)
+        {
+            std::cerr << currentTime() << ": UDP receiver thread has not yet shutdown - waiting more." << std::endl;
+            status = recvThread.wait_for(std::chrono::seconds(2));
+        }
     }
     close(sock);
 }
@@ -174,14 +209,18 @@ UDPPacketReceiver::~UDPPacketReceiver() {
  */
 std::string UDPPacketReceiver::status() {
     std::string ret;
-    ret += "UDP receiver on port "s + std::to_string(portNumber);
-    if(healthCheck())
-        ret += ": Healthy, "s;
-    else {
-        ret += ": NOT healthy, "s;
+
+    if(recvThread.valid())
+    {
+        ret += "UDP receiver thread "s + std::to_string(threadNumber) + " on port "s + std::to_string(portNumber);
+        if(healthCheck())
+            ret += ": Healthy, "s;
+        else {
+            ret += ": NOT healthy, "s;
+        }
+        ret += std::to_string(pktsIn) + " packets in, "s + std::to_string(bytesIn) + " bytes in, "s;
+        ret += timepointDelta(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n"s;
     }
-    ret += std::to_string(pktsIn) + " packets in, "s + std::to_string(bytesIn) + " bytes in, "s;
-    ret += timepointDelta(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n"s;
 
     return ret;
 }

@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <cstdarg>  // For va_start, etc.
 #include <chrono>
+#include <vector>
 
 using namespace std::string_literals;
 
@@ -23,6 +24,12 @@ extern int debug;
 #define DEBUG_ON       1
 #define DEBUG_VERBOSE  2
 
+// Thread configuration parser and data struct
+#define MAX_THREADS    64
+typedef struct ThreadConfigStruct {
+    std::vector<int> cfg;
+} ThreadConfig;
+
 std::ostream& hexDump(std::ostream& os, const void *buffer,
                       std::size_t bufsize, bool showPrintableChars = true, const std::string& prefix = ""s);
 std::string stringFormat(const std::string& fmt_str, ...);
@@ -31,6 +38,7 @@ std::string toBase60(uint64_t val);
 std::string timepointDelta(std::chrono::steady_clock::time_point t1, std::chrono::steady_clock::time_point t2);
 std::string currentTime();
 std::string sockaddrToName(struct sockaddr *sa);
+void ParseThreadConfiguration(int threadcount, std::string& affinity, ThreadConfig *dest);
 
 // If hashFunc is a function that does not result in the same hash for both flow directions,
 // #undef the next line so that GeneveHandler and PacketHeader changes their logic appropriately.

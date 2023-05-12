@@ -31,6 +31,15 @@ Example: ./gwlbtun
   -d         Enable debugging output.
   -x         Enable dumping the hex payload of packets being processed.
 
+Threading options:
+  --udpthreads NUM         Generate NUM threads for the UDP receiver.
+  --udpaffinity AFFIN      Generate threads for the UDP receiver, pinned to the cores listed. Takes precedence over udptreads.
+  --tunthreads NUM         Generate NUM threads for each tunnel processor.
+  --tunaffinity AFFIN      Generate threads for each tunnel processor, pinned to the cores listed. Takes precedence over tunthreads.
+
+AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.
+It is recommended to have the same number of UDP threads as tunnel processor threads, in one-arm operation.
+
 ---------------------------------------------------------------------------------------------------------
 Hook scripts arguments:
 These arguments are provided when gwlbtun calls the hook scripts (the -c <FILE> and/or -r <FILE> command options).
@@ -49,7 +58,7 @@ device name limit).
 ## Source code layout
 main.cpp contains the start of the code, but primarily interfaces with GeneveHandler, defined in GeneveHandler.cpp. 
 That class instantiates UDPPacketReceiver and TunInterface as needed, and generally manages the entire packet handling flow. 
-GenevePacket, PacketHeaderV4, and PacketHeaderV6 handle parsing and validating GENEVE packets, IPv4 packets, and IPv6 packets respectively, and are called by GeneveHandler as needed.
+GenevePacket and PacketHeader handle parsing and validating GENEVE packets and IP packets respectively, and are called by GeneveHandler as needed.
 
 ## Security
 

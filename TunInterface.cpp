@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <exception>
 #include <iostream>
+#include <thread>
 #include "utils.h"
 
 using namespace std::string_literals;
@@ -31,24 +32,26 @@ using namespace std::string_literals;
  * @param mtu MTU to set the interface to.
  * @param recvDispatcher Function the thread should callback to on packets received.
  */
-TunInterface::TunInterface(std::string devname, int mtu, tunCallback recvDispatcher)
-: lastPacket(std::chrono::steady_clock::now()),pktsIn(0),pktsOut(0),bytesIn(0),bytesOut(0), shutdownRequested(false), recvDispatcher(std::move(recvDispatcher))
+TunInterface::TunInterface(std::string devname, int mtu, ThreadConfig threadConfig, tunCallback recvDispatcher)
+: shutdownRequested(false), lastPacket(std::chrono::steady_clock::now()),pktsOut(0),bytesOut(0), recvDispatcher(recvDispatcher)
 {
-    struct ifreq ifr;
-
-    // Code adapted from Linux Documentation/networking/tuntap.txt to create the tun device.
-    if((fd = open("/dev/net/tun", O_RDWR)) < 0)
-        throw std::system_error(errno, std::generic_category(), "Unable to open /dev/net/tun");
-
-    bzero(&ifr, sizeof(ifr));
-    ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
-    strncpy(ifr.ifr_name, devname.c_str(), IFNAMSIZ);
+    if(debug) *debugout << currentTime() << ": TunInterface creating for "s << devname << std::endl;
     this->devname = devname;
 
-    if(ioctl(fd, TUNSETIFF, (void *)&ifr) < 0)
-        throw std::system_error(errno, std::generic_category(), "Unable to create TUN device (does this process have CAP_NET_ADMIN capability?)");
+    // Set up our threads.
+    int tIndex = 0;
+    for(int core : threadConfig.cfg)
+    {
+        tunThreads[tIndex].setup(tIndex, core, allocateHandle(), recvDispatcher);
+        tIndex ++;
+    }
 
     // Mark the tun device link up. We need a dummy socket to do this call.
+    struct ifreq ifr;
+    bzero(&ifr, sizeof(ifr));
+    strncpy(ifr.ifr_name, devname.c_str(), IFNAMSIZ);
+    ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
+
     int dummy = socket(PF_INET, SOCK_DGRAM, 0);
     if(ioctl(dummy, SIOCGIFFLAGS, (void *)&ifr) < 0)
         throw std::system_error(errno, std::generic_category(), "Unable to get device flags");
@@ -64,22 +67,209 @@ TunInterface::TunInterface(std::string devname, int mtu, tunCallback recvDispatc
     if(ioctl(dummy, SIOCSIFMTU, (void *)&ifr) < 0)
         throw std::system_error(errno, std::generic_category(), "Unable to set MTU");
     close(dummy);
-
-    // Launch receiving thread
-    recvThread = std::async(&TunInterface::recvThreadFunction, this);
 }
 
 /**
- * Thread for the tunnel handler. Waits for packets to come in, then calls recvDispatch.
+ * Destructor. Signals the thread to stop, waits for it to shut down, destroys the TUN interface, and returns.
+ */
+TunInterface::~TunInterface() {
+    if(debug)
+    {
+        *debugout << currentTime() << ": TunInterface destroying for "s << devname << std::endl;
+    }
+    shutdownRequested = true;
+
+    // Signal all threads to shutdown down, then wait for all acks.
+    for(auto &thread : tunThreads)
+    {
+        thread.shutdown();
+    }
+
+    bool allgood = false;
+    while(!allgood)
+    {
+        allgood = true;
+        for(auto &thread : tunThreads)
+        {
+            if(thread.setupCalled)
+            {
+                if(thread.healthCheck())
+                allgood = false;
+            }
+        }
+        if(!allgood)
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+}
+
+/**
+ * Send a packet out the TUN interface. Updates internal counters as well.
+ *
+ * @param pkt Buffer pointing to the packet to send
+ * @param pktlen Packet length
+ */
+void TunInterface::writePacket(unsigned char *pkt, ssize_t pktlen)
+{
+    int targetfd;
+    // We can create a new FD (because we're multi-queue) for the writers, and have one per thread to eliminate the
+    // need for locking.
+    std::shared_lock readLock(writerHandlesMutex);
+    auto foundHandle = writerHandles.find(pthread_self());
+    readLock.unlock();
+    if(foundHandle == writerHandles.end())
+    {
+        // Get a write lock, and reverify we still need to create.
+        std::unique_lock writeLock(writerHandlesMutex);
+        foundHandle = writerHandles.find(pthread_self());
+        if(foundHandle == writerHandles.end())
+        {
+            // Create.
+            targetfd = allocateHandle();
+            writerHandles.emplace(pthread_self(), targetfd);
+        } else {
+            targetfd = foundHandle->second;
+        }
+        writeLock.unlock();
+    } else {
+        targetfd = foundHandle->second;
+    }
+
+    // Write the packet.
+    lastPacket = std::chrono::steady_clock::now();
+    pktsOut ++; bytesOut += pktlen;
+    write(targetfd, (void *)pkt, pktlen);
+}
+
+/**
+ * Check on the status of the TUN receiver thread.
+ *
+ * @return true if the thread is still alive, false otherwise.
+ */
+bool TunInterface::healthCheck()
+{
+    bool status = true;
+
+    for(auto &t : tunThreads)
+    {
+        if(t.setupCalled)
+        {
+            if(!t.healthCheck())
+                status = false;
+        }
+    }
+
+    return status;
+}
+
+/**
+ * Human-readable status check of the module.
+ *
+ * @return A string containing thread status and packet counters.
+ */
+std::string TunInterface::status()
+{
+    std::string ret;
+
+    ret += "Interface "s + devname + "\n"s;
+
+    ret += std::to_string(pktsOut) + " packets out to OS, "s + std::to_string(bytesOut) + " bytes out to OS, "s;
+    ret += timepointDelta(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n";
+
+    for(auto &t : tunThreads)
+    {
+        ret += t.status();
+    }
+
+    return ret;
+}
+
+/**
+ * Return the last time any of our threads saw a packet.
+ * @return
+ */
+std::chrono::steady_clock::time_point TunInterface::lastPacketTime()
+{
+    std::chrono::steady_clock::time_point ret;
+
+    for(auto &t : tunThreads)
+    {
+        auto r = t.lastPacketTime();
+        if(r > ret) ret = r;
+    }
+    return ret;
+}
+
+/**
+ * TunThread class handles an individual thread assigned to processing packets coming in from the OS via the gwo interfaces.
+ * Packets
+ * - Launches a thread to service that interface
+ * - Takes a callback function (recvDispatcher) which is called for each packet received by that interface.
+ * - Provides a status() function that returns the packet counters and checks that the thread is still alive.
+ */
+
+TunThread::TunThread()
+: setupCalled(false),isRunning(false),lastPacket(std::chrono::steady_clock::now()),pktsIn(0),pktsOut(0),bytesIn(0),bytesOut(0),shutdownRequested(false)
+{
+
+}
+
+TunThread::~TunThread() noexcept
+{
+    shutdownRequested = true;
+    if(thread.valid())
+    {
+        auto status = thread.wait_for(std::chrono::seconds(2));
+        while(status == std::future_status::timeout)
+        {
+            std::cerr << currentTime() << ": Tunnel thread has not yet shutdown - waiting more." << std::endl;
+            status = thread.wait_for(std::chrono::seconds(2));
+        }
+    }
+}
+
+/**
+ * Set up the tunnel handling thread and start it.
+ * @param threadNum
+ * @param coreNum
+ * @param fd
+ * @param recvDispatcher
+ */
+void TunThread::setup(int threadNumberParam, int coreNumberParam, int fdParam, tunCallback recvDispatcherParam)
+{
+    threadNumber = threadNumberParam;
+    coreNumber = coreNumberParam;
+    recvDispatcher = recvDispatcherParam;
+    fd = fdParam;
+    setupCalled = true;
+    thread = std::async(&TunThread::recvThreadFunction, this);
+}
+
+/**
+ * Thread for the tunnel handler. Opens a new fd, waits for packets to come in, then calls recvDispatch.
  *
  * @return Never returns until termination signal is sent.
  */
-int TunInterface::recvThreadFunction()
+int TunThread::recvThreadFunction()
 {
-    unsigned char *pktbuf;
-
+    if(debug) *debugout << currentTime() << ": Tun Thread " << std::to_string(threadNumber) << ": Starting" << std::endl;
     pthread_setname_np(pthread_self(), "gwlbtun (Tun)");
 
+    // If a specific core was requested, attempt to set affinity.
+    if(coreNumber != -1)
+    {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(coreNumber, &cpuset);
+        int s = pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+        if(s != 0)
+        {
+            std::cerr << currentTime() << ": Tun Thread " << std::to_string(threadNumber) << ": Unable to set TUN thread CPU affinity to core "s << std::to_string(coreNumber) << ": "s << std::error_code{errno, std::generic_category()}.message() << ". Thread continuing to run with affinity unset."s << std::endl;
+        }
+    }
+
+    isRunning = true;
+
+    unsigned char *pktbuf;
     // Static packet processing buffer.
     pktbuf = new unsigned char[65535];
 
@@ -103,75 +293,88 @@ int TunInterface::recvThreadFunction()
                 recvDispatcher(pktbuf, msgLen);
             }
             catch (std::exception& e) {
-                std::cerr << currentTime() << "Tunnel interface " << devname << " packet dispatch function failed: " << e.what() << std::endl;
+                std::cerr << currentTime() << ": Tun Thread " << std::to_string(threadNumber) << ": Packet dispatch function failed: " << e.what() << std::endl;
             }
             pktsIn ++; bytesIn += msgLen;
         }
     }
+    isRunning = false;
+    if(debug) *debugout << currentTime() << ": Tun Thread " << std::to_string(threadNumber) << ": Stopping by request" << std::endl;
     delete [] pktbuf;
     return(0);
 }
 
-/**
- * Destructor. Signals the thread to stop, waits for it to shut down, destroys the TUN interface, and returns.
- */
-TunInterface::~TunInterface() {
-    shutdownRequested = true;
-    // The std::async threads will see that boolean change within 1 second, then exit, which allows the
-    // async object to finish its destruction.
-    auto status = recvThread.wait_for(std::chrono::seconds(2));
-    while(status == std::future_status::timeout)
-    {
-        std::cerr << currentTime() << ": Tunnel thread has not yet shutdown - waiting more." << std::endl;
-        status = recvThread.wait_for(std::chrono::seconds(2));
-    }
-    close(fd);
-}
 
-/**
- * Send a packet out the TUN interface. Updates internal counters as well.
- *
- * @param pkt Buffer pointing to the packet to send
- * @param pktlen Packet length
- */
-void TunInterface::writePacket(unsigned char *pkt, ssize_t pktlen)
+bool TunThread::healthCheck()
 {
-    lastPacket = std::chrono::steady_clock::now();
-    pktsOut ++; bytesOut += pktlen;
-    write(fd, (void *)pkt, pktlen);
-}
-
-/**
- * Check on the status of the TUN receiver thread.
- *
- * @return true if the thread is still alive, false otherwise.
- */
-bool TunInterface::healthCheck() {
-    auto status = recvThread.wait_for(std::chrono::seconds(0));
-    if(status != std::future_status::timeout)
+    if(thread.valid())
     {
-        return false;
+        auto status = thread.wait_for(std::chrono::seconds(0));
+        if(status != std::future_status::timeout)
+        {
+            return false;
+        }
+        return true;
     }
-    return true;
+    return false;
 }
 
-/**
- * Human-readable status check of the module.
- *
- * @return A string containing thread status and packet counters.
- */
-std::string TunInterface::status() {
+std::string TunThread::status()
+{
     std::string ret;
+    if(thread.valid())
+    {
+        ret = "Tunnel handler thread "s + std::to_string(threadNumber);
 
-    ret += "Interface "s + devname;
-    if(healthCheck())
-        ret += ": Healthy, "s;
-    else {
-        ret += ": NOT healthy, "s;
+        if(healthCheck())
+            ret += ": Healthy, "s;
+        else {
+            ret += ": NOT healthy, "s;
+        }
+        ret += std::to_string(pktsIn) + " packets in from OS, "s + std::to_string(bytesIn) + " bytes in from OS, "s;
+        ret += timepointDelta(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n";
     }
-    ret += std::to_string(pktsIn) + " packets in from OS, "s + std::to_string(bytesIn) + " bytes in from OS, "s +
-           std::to_string(pktsOut) + " packets out to OS, "s + std::to_string(bytesOut) + " bytes out to OS, "s;
-    ret += timepointDelta(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n";
-
     return ret;
+}
+
+void TunThread::shutdown()
+{
+    shutdownRequested = true;
+}
+
+std::chrono::steady_clock::time_point TunThread::lastPacketTime()
+{
+    return lastPacket.load();
+}
+
+/*
+ * Allocate a new fd for our tun device. May throw exceptions.
+ *
+ * @return The new file descriptor.
+ */
+int TunInterface::allocateHandle()
+{
+    int fd;
+
+    // Set up a new multiqueue file handler to process our packets
+    struct ifreq ifr;
+    bzero(&ifr, sizeof(ifr));
+
+    // Code adapted from Linux Documentation/networking/tuntap.txt to create the tun device.
+    if((fd = open("/dev/net/tun", O_RDWR)) < 0)
+    {
+        std::cerr << currentTime() << ": Unable to open /dev/net/tun " << std::error_code{errno, std::generic_category()}.message() << std::endl;
+        throw std::system_error(errno, std::generic_category(), "Unable to open /dev/net/tun");
+    }
+
+    ifr.ifr_flags = IFF_TUN | IFF_NO_PI | IFF_MULTI_QUEUE;
+    strncpy(ifr.ifr_name, devname.c_str(), IFNAMSIZ);
+
+    if(ioctl(fd, TUNSETIFF, (void *)&ifr) < 0)
+    {
+        std::cerr << currentTime() << ": Unable to create TUN device (does this process have CAP_NET_ADMIN capability?)" << std::error_code{errno, std::generic_category()}.message() << std::endl;
+        throw std::system_error(errno, std::generic_category(), "Unable to create TUN device (does this process have CAP_NET_ADMIN capability?)");
+    }
+
+    return fd;
 }

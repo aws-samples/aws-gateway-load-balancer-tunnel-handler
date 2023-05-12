@@ -202,3 +202,57 @@ std::string sockaddrToName(struct sockaddr *sa)
 
     return std::string(tbuf);
 }
+
+/**
+ * Parse input parameters of thread count and core configuration, and populate the ThreadConfig. A thread configuration
+ * string is a comma-separated list of cores or ranges, i.e. 1,2,4-6,8.
+ *
+ * @param threadcount Number of threads requested on command line, if provided,  0 if not. Defaults to 1, if needed.
+ * @param affinity The thread affinity string requested on command line.
+ * @param dest
+ * @return None, but raises exceptions on error (generally a threadcfg that doesn't make sense)
+ */
+void ParseThreadConfiguration(int threadcount, std::string& affinity, ThreadConfig *dest)
+{
+    // Handle case when the detailed thread configuration wasn't passed, and we just want some threads.
+    if(affinity.empty())
+    {
+        if(threadcount == 0)
+            dest->cfg.resize(1, -1);
+        else
+            dest->cfg.resize(threadcount, -1);
+    } else {
+        // Parse the threadcfg string.
+        dest->cfg.resize(0);
+        size_t pos = 0;
+        while(pos < affinity.length())
+        {
+            // Find next comma if any, pull out substring.
+            size_t comma_pos = affinity.find(",",pos);
+            if(comma_pos == std::string::npos)
+                comma_pos = affinity.length();
+            std::string range = affinity.substr(pos, comma_pos - pos);
+            // Is this a range?
+            size_t dash_pos = range.find("-");
+            if(dash_pos == std::string::npos)
+            {
+                // Nope, just a bare number.
+                dest->cfg.push_back(std::stoi(range));
+            } else {
+                int start = std::stoi(range.substr(0, dash_pos));
+                int end = std::stoi(range.substr(dash_pos + 1));
+                for(int i = start ; i <= end ; i ++)
+                {
+                    dest->cfg.push_back(i);
+                }
+            }
+            // Move up.
+            pos = comma_pos + 1;
+        }
+    }
+    // Do some checks.
+    if(dest->cfg.size() > MAX_THREADS)
+        throw std::length_error("The number of threads specified ("s + std::to_string(dest->cfg.size()) + ") exceeds the maximum allowed ("s + std::to_string(MAX_THREADS) + "). Recompile code and increase MAX_THREADS in util.h if you need more."s);
+
+    // We will check the ability to set affinity at set time.
+}

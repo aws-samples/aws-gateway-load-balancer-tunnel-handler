@@ -14,6 +14,7 @@
 #include "GenevePacket.h"
 #include "PacketHeaderV4.h"
 #include "PacketHeaderV6.h"
+#include "utils.h"
 
 typedef std::function<void(std::string inInt, std::string outInt, uint64_t eniId)> ghCallback;
 
@@ -34,7 +35,7 @@ public:
 
 class GeneveHandler {
 public:
-    GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout);
+    GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads);
     ~GeneveHandler();
     std::string check();
     bool healthy;                  // Updated by check()
@@ -53,11 +54,12 @@ private:
     std::unordered_map<uint64_t, std::unordered_map<PacketHeaderV6, GwlbData>> gwlbV6Cookies;
 
     std::vector<class TunInterface> tunints;
-    class UDPPacketReceiver udpRcvr;
+    std::array<class UDPPacketReceiver, MAX_THREADS> udpRcvrs;
 
     ghCallback createCallback;
     ghCallback destroyCallback;
     int destroyTimeout;
+    ThreadConfig tunThreadConfig;
 };
 
 #endif //GWLBTUN_GENEVEHANDLER_H

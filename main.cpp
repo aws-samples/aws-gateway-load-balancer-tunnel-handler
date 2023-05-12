@@ -101,6 +101,15 @@ void printHelp(char *progname)
             "  -d         Enable debugging output.\n"
             "  -x         Enable dumping the hex payload of packets being processed.\n"
             "\n"
+            "Threading options:\n"
+            "  --udpthreads NUM         Generate NUM threads for the UDP receiver.\n"
+            "  --udpaffinity AFFIN      Generate threads for the UDP receiver, pinned to the cores listed. Takes precedence over udptreads.\n"
+            "  --tunthreads NUM         Generate NUM threads for each tunnel processor.\n"
+            "  --tunaffinity AFFIN      Generate threads for each tunnel processor, pinned to the cores listed. Takes precedence over tunthreads.\n"
+            "\n"
+            "AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.\n"
+            "It is recommended to have the same number of UDP threads as tunnel processor threads, in one-arm operation.\n"
+            "\n"
             "---------------------------------------------------------------------------------------------------------\n"
             "Hook scripts arguments:\n"
             "These arguments are provided when gwlbtun calls the hook scripts (the -c <FILE> and/or -r <FILE> command options).\n"
@@ -132,13 +141,49 @@ int main(int argc, char *argv[])
     int c;
     int healthCheck = 0, healthSocket;
     int tunnelTimeout = 0;
+    int udpthreads = 0, tunthreads = 0;
+    std::string udpaffinity, tunaffinity;
     bool detailedHealth = true;
 
+    static struct option long_options[] = {
+            {"cmdnew", required_argument, NULL, 'c'},
+            {"cmddel", required_argument, NULL, 'r'},
+            {"timeout", required_argument, NULL, 't'},
+            {"port", required_argument, NULL, 'p'},
+            {"debug", no_argument, NULL, 'd'},
+            {"hex", no_argument, NULL, 'x'},
+            {"help", no_argument, NULL, 'h'},
+            {"help", no_argument, NULL, '?'},
+            {"udpthreads", required_argument, NULL, 0},    // optind 8
+            {"udpaffinity", required_argument, NULL, 0},   // optind 9
+            {"tunthreads", required_argument, NULL, 0},    // optind 10
+            {"tunaffinity", required_argument, NULL, 0},   // optind 11
+            {0, 0, 0, 0}
+    };
+
     // Argument parsing
-    while ((c = getopt (argc, argv, "hdxc:r:t:p:s")) != -1)
+    int optind;
+    while ((c = getopt_long (argc, argv, "h?dxc:r:t:p:s", long_options, &optind)) != -1)
     {
         switch(c)
         {
+            case 0:
+                // Long option
+                switch(optind) {
+                    case 8:
+                        udpthreads = atoi(optarg);
+                        break;
+                    case 9:
+                        udpaffinity = std::string(optarg);
+                        break;
+                    case 10:
+                        tunthreads = atoi(optarg);
+                        break;
+                    case 11:
+                        tunaffinity = std::string(optarg);
+                        break;
+                }
+                break;
             case 'c':
                 newCmd = std::string(optarg);
                 break;
@@ -155,11 +200,11 @@ int main(int argc, char *argv[])
                 detailedHealth = false;
                 break;
             case 'd':
-                debugout = &std::cerr;
+                debugout = &std::clog;
                 if(debug < DEBUG_ON) debug = DEBUG_ON;
                 break;
             case 'x':
-                hexout = &std::cerr;
+                hexout = &std::clog;
                 if(debug < DEBUG_VERBOSE) debug = DEBUG_VERBOSE;
                 break;
             case '?':
@@ -196,7 +241,11 @@ int main(int argc, char *argv[])
 
     signal(SIGINT, shutdownHandler);
 
-    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout);
+    ThreadConfig udp, tun;
+    ParseThreadConfiguration(udpthreads, udpaffinity, &udp);
+    ParseThreadConfiguration(tunthreads, tunaffinity, &tun);
+
+    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, udp, tun);
     struct timespec timeout;
     timeout.tv_sec = 1; timeout.tv_nsec = 0;
     fd_set fds;
