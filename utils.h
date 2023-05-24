@@ -25,7 +25,7 @@ extern int debug;
 #define DEBUG_VERBOSE  2
 
 // Thread configuration parser and data struct
-#define MAX_THREADS    64
+#define MAX_THREADS    128
 typedef struct ThreadConfigStruct {
     std::vector<int> cfg;
 } ThreadConfig;
