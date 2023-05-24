@@ -252,7 +252,7 @@ void ParseThreadConfiguration(int threadcount, std::string& affinity, ThreadConf
     }
     // Do some checks.
     if(dest->cfg.size() > MAX_THREADS)
-        throw std::length_error("The number of threads specified ("s + std::to_string(dest->cfg.size()) + ") exceeds the maximum allowed ("s + std::to_string(MAX_THREADS) + "). Recompile code and increase MAX_THREADS in util.h if you need more."s);
+        throw std::length_error("The number of threads specified ("s + std::to_string(dest->cfg.size()) + ") exceeds the maximum allowed ("s + std::to_string(MAX_THREADS) + "). Recompile code and increase MAX_THREADS in utils.h if you need more."s);
 
     // We will check the ability to set affinity at set time.
 }
