@@ -4,7 +4,7 @@
 /**
  * TunInterface handles creating and processing traffic received on TUN interfaces. This class:
  * - Creates the requested Tun interface
- * - Launches a thread to service that interface
+ * - Launches threads to service that interface
  * - Takes a callback function (recvDispatcher) which is called for each packet received by that interface.
  * - Provides a status() function that returns the packet counters and checks that the thread is still alive.
  */
@@ -32,17 +32,17 @@ using namespace std::string_literals;
  * @param mtu MTU to set the interface to.
  * @param recvDispatcher Function the thread should callback to on packets received.
  */
-TunInterface::TunInterface(std::string devname, int mtu, ThreadConfig threadConfig, tunCallback recvDispatcher)
-: shutdownRequested(false), lastPacket(std::chrono::steady_clock::now()),pktsOut(0),bytesOut(0), recvDispatcher(recvDispatcher)
+TunInterface::TunInterface(std::string devname, int mtu, ThreadConfig threadConfig, tunCallback recvDispatcherParam)
+: lastPacket(std::chrono::steady_clock::now()),pktsOut(0),bytesOut(0)
 {
     if(debug) *debugout << currentTime() << ": TunInterface creating for "s << devname << std::endl;
     this->devname = devname;
 
-    // Set up our threads.
+    // Set up our threads as per threadConfig
     int tIndex = 0;
     for(int core : threadConfig.cfg)
     {
-        tunThreads[tIndex].setup(tIndex, core, allocateHandle(), recvDispatcher);
+        threads[tIndex].setup(tIndex, core, allocateHandle(), recvDispatcherParam);
         tIndex ++;
     }
 
@@ -72,15 +72,20 @@ TunInterface::TunInterface(std::string devname, int mtu, ThreadConfig threadConf
 /**
  * Destructor. Signals the thread to stop, waits for it to shut down, destroys the TUN interface, and returns.
  */
-TunInterface::~TunInterface() {
+TunInterface::~TunInterface()
+{
+    shutdown();
+}
+
+void TunInterface::shutdown()
+{
     if(debug)
     {
         *debugout << currentTime() << ": TunInterface destroying for "s << devname << std::endl;
     }
-    shutdownRequested = true;
 
     // Signal all threads to shutdown down, then wait for all acks.
-    for(auto &thread : tunThreads)
+    for(auto &thread : threads)
     {
         thread.shutdown();
     }
@@ -89,12 +94,12 @@ TunInterface::~TunInterface() {
     while(!allgood)
     {
         allgood = true;
-        for(auto &thread : tunThreads)
+        for(auto &thread : threads)
         {
             if(thread.setupCalled)
             {
                 if(thread.healthCheck())
-                allgood = false;
+                    allgood = false;
             }
         }
         if(!allgood)
@@ -149,7 +154,7 @@ bool TunInterface::healthCheck()
 {
     bool status = true;
 
-    for(auto &t : tunThreads)
+    for(auto &t : threads)
     {
         if(t.setupCalled)
         {
@@ -170,15 +175,17 @@ std::string TunInterface::status()
 {
     std::string ret;
 
-    ret += "Interface "s + devname + "\n"s;
+    ret += "Interface "s + devname + ":\n"s;
 
     ret += std::to_string(pktsOut) + " packets out to OS, "s + std::to_string(bytesOut) + " bytes out to OS, "s;
     ret += timepointDelta(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n";
 
-    for(auto &t : tunThreads)
+    for(auto &t : threads)
     {
         ret += t.status();
     }
+
+    ret += "\n"s;
 
     return ret;
 }
@@ -191,7 +198,7 @@ std::chrono::steady_clock::time_point TunInterface::lastPacketTime()
 {
     std::chrono::steady_clock::time_point ret;
 
-    for(auto &t : tunThreads)
+    for(auto &t : threads)
     {
         auto r = t.lastPacketTime();
         if(r > ret) ret = r;
@@ -200,29 +207,30 @@ std::chrono::steady_clock::time_point TunInterface::lastPacketTime()
 }
 
 /**
- * TunThread class handles an individual thread assigned to processing packets coming in from the OS via the gwo interfaces.
+ * TunInterfaceThread class handles an individual thread assigned to processing packets coming in from the OS via the gwo interfaces.
  * Packets
  * - Launches a thread to service that interface
  * - Takes a callback function (recvDispatcher) which is called for each packet received by that interface.
  * - Provides a status() function that returns the packet counters and checks that the thread is still alive.
  */
 
-TunThread::TunThread()
-: setupCalled(false),isRunning(false),lastPacket(std::chrono::steady_clock::now()),pktsIn(0),pktsOut(0),bytesIn(0),bytesOut(0),shutdownRequested(false)
+TunInterfaceThread::TunInterfaceThread()
+: setupCalled(false),lastPacket(std::chrono::steady_clock::now()),pktsIn(0),pktsOut(0),bytesIn(0),bytesOut(0),shutdownRequested(false)
 {
 
 }
 
-TunThread::~TunThread() noexcept
+TunInterfaceThread::~TunInterfaceThread() noexcept
 {
     shutdownRequested = true;
+    // If this thread has been setup and is running, signal shutdown and wait for it to complete.
     if(thread.valid())
     {
         auto status = thread.wait_for(std::chrono::seconds(2));
         while(status == std::future_status::timeout)
         {
-            std::cerr << currentTime() << ": Tunnel thread has not yet shutdown - waiting more." << std::endl;
-            status = thread.wait_for(std::chrono::seconds(2));
+            std::cerr << currentTime() << ": Tunnel thread "s << std::to_string(threadNumber) << " has not yet shutdown - waiting more."s << std::endl;
+            status = thread.wait_for(std::chrono::seconds(1));
         }
     }
 }
@@ -234,14 +242,14 @@ TunThread::~TunThread() noexcept
  * @param fd
  * @param recvDispatcher
  */
-void TunThread::setup(int threadNumberParam, int coreNumberParam, int fdParam, tunCallback recvDispatcherParam)
+void TunInterfaceThread::setup(int threadNumberParam, int coreNumberParam, int fdParam, tunCallback recvDispatcherParam)
 {
     threadNumber = threadNumberParam;
     coreNumber = coreNumberParam;
     recvDispatcher = recvDispatcherParam;
     fd = fdParam;
     setupCalled = true;
-    thread = std::async(&TunThread::recvThreadFunction, this);
+    thread = std::async(&TunInterfaceThread::threadFunction, this);
 }
 
 /**
@@ -249,10 +257,13 @@ void TunThread::setup(int threadNumberParam, int coreNumberParam, int fdParam, t
  *
  * @return Never returns until termination signal is sent.
  */
-int TunThread::recvThreadFunction()
+int TunInterfaceThread::threadFunction()
 {
+    char threadName[16];
     if(debug) *debugout << currentTime() << ": Tun Thread " << std::to_string(threadNumber) << ": Starting" << std::endl;
-    pthread_setname_np(pthread_self(), "gwlbtun (Tun)");
+    threadId = gettid();
+    snprintf(threadName, 15, "gwlbtun T%03d", threadNumber);
+    pthread_setname_np(pthread_self(), threadName);
 
     // If a specific core was requested, attempt to set affinity.
     if(coreNumber != -1)
@@ -264,10 +275,11 @@ int TunThread::recvThreadFunction()
         if(s != 0)
         {
             std::cerr << currentTime() << ": Tun Thread " << std::to_string(threadNumber) << ": Unable to set TUN thread CPU affinity to core "s << std::to_string(coreNumber) << ": "s << std::error_code{errno, std::generic_category()}.message() << ". Thread continuing to run with affinity unset."s << std::endl;
+        } else {
+            snprintf(threadName, 15, "gwlbtun TA%03d", coreNumber);
+            pthread_setname_np(pthread_self(), threadName);
         }
     }
-
-    isRunning = true;
 
     unsigned char *pktbuf;
     // Static packet processing buffer.
@@ -298,14 +310,13 @@ int TunThread::recvThreadFunction()
             pktsIn ++; bytesIn += msgLen;
         }
     }
-    isRunning = false;
     if(debug) *debugout << currentTime() << ": Tun Thread " << std::to_string(threadNumber) << ": Stopping by request" << std::endl;
     delete [] pktbuf;
     return(0);
 }
 
 
-bool TunThread::healthCheck()
+bool TunInterfaceThread::healthCheck()
 {
     if(thread.valid())
     {
@@ -319,12 +330,12 @@ bool TunThread::healthCheck()
     return false;
 }
 
-std::string TunThread::status()
+std::string TunInterfaceThread::status()
 {
     std::string ret;
     if(thread.valid())
     {
-        ret = "Tunnel handler thread "s + std::to_string(threadNumber);
+        ret = "Tunnel handler thread "s + std::to_string(threadNumber) + " (ID "s + std::to_string(threadId) + ")"s;
 
         if(healthCheck())
             ret += ": Healthy, "s;
@@ -337,12 +348,12 @@ std::string TunThread::status()
     return ret;
 }
 
-void TunThread::shutdown()
+void TunInterfaceThread::shutdown()
 {
     shutdownRequested = true;
 }
 
-std::chrono::steady_clock::time_point TunThread::lastPacketTime()
+std::chrono::steady_clock::time_point TunInterfaceThread::lastPacketTime()
 {
     return lastPacket.load();
 }

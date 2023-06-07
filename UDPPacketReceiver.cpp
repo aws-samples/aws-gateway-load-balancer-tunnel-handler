@@ -4,7 +4,7 @@
 /**
  * UDPPacketReceiver class handles monitoring a UDP port (6081 for GENEVE). It performs the following functions:
  * - Start a listener for the port
- * - Launch a thread to listen for packets in on that port
+ * - Launch threads to listen for packets in on that port
  * - Call recvDispatcher for each packet received.
  * - Provides a status() function that returns the packet counters and checks that the thread is still alive.
  */
@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <iostream>
 #include <utility>
+#include <thread>
 #include "utils.h"
 
 using namespace std::string_literals;
@@ -23,9 +24,42 @@ using namespace std::string_literals;
  * Default constructor for array initialization.
  */
 UDPPacketReceiver::UDPPacketReceiver()
-        : setupCalled(false), lastPacket(std::chrono::steady_clock::now()), pktsIn(0), bytesIn(0), shutdownRequested(false), portNumber(0), recvDispatcher(nullptr)
+        : portNumber(0)
 {
     // Empty init. Need to set port and receive function with a setup() call.
+}
+
+/**
+ * Destructor. Signals all threads to shut down, waits for that to finish.
+ */
+UDPPacketReceiver::~UDPPacketReceiver()
+{
+    shutdown();
+}
+
+void UDPPacketReceiver::shutdown()
+{
+    // Signal all threads to shutdown down, then wait for all acks.
+    for(auto &thread : threads)
+    {
+        thread.shutdown();
+    }
+
+    bool allgood = false;
+    while(!allgood)
+    {
+        allgood = true;
+        for(auto &thread : threads)
+        {
+            if(thread.setupCalled)
+            {
+                if(thread.healthCheck())
+                    allgood = false;
+            }
+        }
+        if(!allgood)
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
 }
 
 /**
@@ -34,10 +68,90 @@ UDPPacketReceiver::UDPPacketReceiver()
  * @param portNumber UDP port number to listen to.
  * @param recvDispatcher Function to callback to on each packet received.
  */
-void UDPPacketReceiver::setup(int threadNumberParam, int coreNumberParam, uint16_t portNumberParam, udpCallback recvDispatcherParam)
+void UDPPacketReceiver::setup(ThreadConfig threadConfig, uint16_t portNumberParam, udpCallback recvDispatcherParam)
+{
+    if(debug) *debugout << currentTime() << ": UDP receiver setting up on port "s << std::to_string(portNumberParam) << std::endl;
+    portNumber = portNumberParam;
+
+    // Set up our threads as per threadConfig
+    int tIndex = 0;
+    for(int core : threadConfig.cfg)
+    {
+        threads[tIndex].setup(tIndex, core, portNumberParam, recvDispatcherParam);
+        tIndex ++;
+    }
+}
+
+/**
+ * Check on the status of the UDP receiver thread.
+ *
+ * @return true if the thread is still alive, false otherwise.
+ */
+bool UDPPacketReceiver::healthCheck()
+{
+    bool status = true;
+
+    for(auto &t : threads)
+    {
+        if(t.setupCalled)
+        {
+            if(!t.healthCheck())
+                status = false;
+        }
+    }
+
+    return status;
+}
+
+/**
+ * Human-readable status check of the module.
+ *
+ * @return A string containing thread status and packet counters.
+ */
+std::string UDPPacketReceiver::status() {
+    std::string ret;
+
+    ret += "UDP receiver threads for port number "s + std::to_string(portNumber) + ":\n";
+
+    for(auto &t : threads)
+    {
+        ret += t.status();
+    }
+
+    ret += "\n";
+
+    return ret;
+}
+
+/**
+* UDPPacketReceiverThread coordinates and holds the thread for one individual thread of UDP receiving.
+*/
+UDPPacketReceiverThread::UDPPacketReceiverThread()
+    : setupCalled(false), sock(0), portNumber(0), threadNumber(0), coreNumber(0), shutdownRequested(false), lastPacket(std::chrono::steady_clock::now()), pktsIn(0), bytesIn(0)
+{
+    // Empty init, until setup is called.
+}
+
+UDPPacketReceiverThread::~UDPPacketReceiverThread()
+{
+    shutdownRequested = true;
+    // If this thread has been setup and is running, signal shutdown and wait for it to complete.
+    if(thread.valid())
+    {
+        auto status = thread.wait_for(std::chrono::seconds(2));
+        while(status == std::future_status::timeout)
+        {
+            std::cerr << currentTime() << ": UDP receiver thread "s << std::to_string(threadNumber) << " has not yet shutdown - waiting more."s << std::endl;
+            status = thread.wait_for(std::chrono::seconds(1));
+        }
+    }
+}
+
+void UDPPacketReceiverThread::setup(int threadNumberParam, int coreNumberParam, uint16_t portNumberParam,
+                                    udpCallback recvDispatcherParam)
 {
     int yes = 1;
-    struct sockaddr_in address;
+    struct sockaddr_in address{};
 
     threadNumber = threadNumberParam;
     coreNumber = coreNumberParam;
@@ -63,7 +177,7 @@ void UDPPacketReceiver::setup(int threadNumberParam, int coreNumberParam, uint16
     if(bind(sock, (const struct sockaddr *)&address, (socklen_t)sizeof(address)) < 0)
         throw std::system_error(errno, std::generic_category(), "Port binding failed");
 
-    recvThread = std::async(&UDPPacketReceiver::recvThreadFunction, this);
+    thread = std::async(&UDPPacketReceiverThread::threadFunction, this);
 }
 
 /**
@@ -71,21 +185,23 @@ void UDPPacketReceiver::setup(int threadNumberParam, int coreNumberParam, uint16
  *
  * @return Never returns, until told to shutdown.
  */
-int UDPPacketReceiver::recvThreadFunction()
+int UDPPacketReceiverThread::threadFunction()
 {
-    struct sockaddr_storage src_addr;
+    struct sockaddr_storage src_addr{};
     struct sockaddr_in *src_addr4;
-    struct msghdr mh;
+    struct msghdr mh{};
     struct cmsghdr *cmhdr;
     struct iovec iov[1];
     struct in_pktinfo *ipi;
     unsigned char *pktbuf, *control;
+    char threadName[16];
 
     // Static packet processing buffers.
     pktbuf = new unsigned char[65535];
     control = new unsigned char[2048];
-
-    pthread_setname_np(pthread_self(), "gwlbtun (UDP)");
+    threadId = gettid();
+    snprintf(threadName, 15, "gwlbtun U%03d", threadNumber);
+    pthread_setname_np(pthread_self(), threadName);
 
     // If a specific core was requested, attempt to set affinity.
     if(coreNumber != -1)
@@ -97,6 +213,9 @@ int UDPPacketReceiver::recvThreadFunction()
         if(s != 0)
         {
             std::cerr << "Unable to set UDP thread CPU affinity to core "s << std::to_string(coreNumber) << ": "s << std::error_code{errno, std::generic_category()}.message() << ". Thread continuing to run with affinity unset."s << std::endl;
+        } else {
+            snprintf(threadName, 15, "gwlbtun UA%03d", coreNumber);
+            pthread_setname_np(pthread_self(), threadName);
         }
     }
 
@@ -112,7 +231,7 @@ int UDPPacketReceiver::recvThreadFunction()
     // Receive packets and dispatch them.  check every second to make sure a shutdown hasn't been requested.
     // printf("UDP receive thread active.\n");
     ssize_t msgLen;
-    struct timeval tv;
+    struct timeval tv{};
     fd_set readfds;
     while(!shutdownRequested)
     {
@@ -158,15 +277,11 @@ int UDPPacketReceiver::recvThreadFunction()
     return(0);
 }
 
-/**
- * Check on the status of the UDP receiver thread.
- *
- * @return true if the thread is still alive, false otherwise.
- */
-bool UDPPacketReceiver::healthCheck() {
-    if(recvThread.valid())
+bool UDPPacketReceiverThread::healthCheck()
+{
+    if(thread.valid())
     {
-        auto status = recvThread.wait_for(std::chrono::seconds(0));
+        auto status = thread.wait_for(std::chrono::seconds(0));
         if(status != std::future_status::timeout)
         {
             return false;
@@ -176,43 +291,12 @@ bool UDPPacketReceiver::healthCheck() {
     return false;
 }
 
-/**
- * Shutdown the packet receiver.
- */
-void UDPPacketReceiver::shutdown() {
-    shutdownRequested = true;
-    // The std::async threads will see that boolean change within 1 second, then exit, which allows the
-    // async object to finish its destruction.
-    if(recvThread.valid())
-    {
-        auto status = recvThread.wait_for(std::chrono::seconds(2));
-        while(status == std::future_status::timeout)
-        {
-            std::cerr << currentTime() << ": UDP receiver thread has not yet shutdown - waiting more." << std::endl;
-            status = recvThread.wait_for(std::chrono::seconds(2));
-        }
-    }
-    close(sock);
-}
-
-/**
- * Destructor. Signals the thread to shut down, waits for that to finish, then closes the socket.
- */
-UDPPacketReceiver::~UDPPacketReceiver() {
-    shutdown();
-}
-
-/**
- * Human-readable status check of the module.
- *
- * @return A string containing thread status and packet counters.
- */
-std::string UDPPacketReceiver::status() {
+std::string UDPPacketReceiverThread::status()
+{
     std::string ret;
-
-    if(recvThread.valid())
+    if(thread.valid())
     {
-        ret += "UDP receiver thread "s + std::to_string(threadNumber) + " on port "s + std::to_string(portNumber);
+        ret += "UDP receiver thread "s + std::to_string(threadNumber) + " (ID "s + std::to_string(threadId) + ")"s;
         if(healthCheck())
             ret += ": Healthy, "s;
         else {
@@ -223,4 +307,9 @@ std::string UDPPacketReceiver::status() {
     }
 
     return ret;
+}
+
+void UDPPacketReceiverThread::shutdown() {
+    shutdownRequested = true;
+    // The std::async threads will see that boolean change within 1 second, then exit.
 }

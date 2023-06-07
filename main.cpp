@@ -80,6 +80,17 @@ void performHealthCheck(bool details, GeneveHandler *gh, int s)
 }
 
 /**
+ * Returns the number of cores available to this process.
+ * @return Integer core count.
+ */
+int numCores()
+{
+    cpu_set_t cpuset;
+    sched_getaffinity(0, sizeof(cpuset), &cpuset);
+    return CPU_COUNT(&cpuset);
+}
+
+/**
  * Prints command help.
  *
  * @param progname
@@ -109,7 +120,11 @@ void printHelp(char *progname)
             "\n"
             "AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.\n"
             "It is recommended to have the same number of UDP threads as tunnel processor threads, in one-arm operation.\n"
+            "If unspecified, --udpthreads %d and --tunthreads %d will be assumed as a default, based on the number of cores present.\n"
             "\n"
+#ifdef NO_RETURN_TRAFFIC
+            "This version of GWLBTun has been compiled with NO_RETURN_TRAFFIC defined.\n"
+#endif
             "---------------------------------------------------------------------------------------------------------\n"
             "Hook scripts arguments:\n"
             "These arguments are provided when gwlbtun calls the hook scripts (the -c <FILE> and/or -r <FILE> command options).\n"
@@ -123,7 +138,7 @@ void printHelp(char *progname)
             "\n"
             "The <X> in the interface name is replaced with the base 60 encoded ENI ID (to fit inside the 15 character\n"
             "device name limit).\n"
-            , progname, progname);
+            , progname, progname, numCores(), numCores());
 }
 
 /**
@@ -141,7 +156,7 @@ int main(int argc, char *argv[])
     int c;
     int healthCheck = 0, healthSocket;
     int tunnelTimeout = 0;
-    int udpthreads = 0, tunthreads = 0;
+    int udpthreads = numCores(), tunthreads = numCores();
     std::string udpaffinity, tunaffinity;
     bool detailedHealth = true;
 

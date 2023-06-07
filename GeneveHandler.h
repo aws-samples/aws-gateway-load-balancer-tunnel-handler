@@ -47,14 +47,16 @@ private:
     // Storage, keyed by ENI id.
     std::shared_mutex eniIdLock;   // Used to access elements of the 3 unordered maps below.
     std::unordered_map<uint64_t, std::unique_ptr<TunInterface>> tunnelIn;
+#ifndef NO_RETURN_TRAFFIC
     std::unordered_map<uint64_t, std::unique_ptr<TunInterface>> tunnelOut;
     std::unordered_map<uint64_t, std::unique_ptr<std::shared_mutex>> gwlbV4CookiesMutex;   // These mutexes protect the gwlbV4Cookies below.
     std::unordered_map<uint64_t, std::unordered_map<PacketHeaderV4, GwlbData>> gwlbV4Cookies;
     std::unordered_map<uint64_t, std::unique_ptr<std::shared_mutex>> gwlbV6CookiesMutex;   // These mutexes protect the gwlbV4Cookies below.
     std::unordered_map<uint64_t, std::unordered_map<PacketHeaderV6, GwlbData>> gwlbV6Cookies;
+#endif
 
     std::vector<class TunInterface> tunints;
-    std::array<class UDPPacketReceiver, MAX_THREADS> udpRcvrs;
+    UDPPacketReceiver udpRcvr;
 
     ghCallback createCallback;
     ghCallback destroyCallback;

@@ -54,12 +54,7 @@ GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallba
           tunThreadConfig(std::move(tunThreads))
 {
     // Set up UDP receiver threads.
-    int tIndex = 0;
-    for(int core : udpThreads.cfg)
-    {
-        udpRcvrs[tIndex].setup(tIndex, core, GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6));
-        tIndex ++;
-    }
+    udpRcvr.setup(udpThreads, GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6));
 }
 
 /**
@@ -74,21 +69,8 @@ std::string GeneveHandler::check()
     std::vector<uint64_t> enisToDelete;
     auto now = std::chrono::steady_clock::now();
     auto cutoff = now - std::chrono::duration<int, std::ratio<1,1>>(destroyTimeout);
-    healthy = true;
-
-    // check our receive handlers
-    for (auto &udpRcvr : udpRcvrs)
-    {
-        if(udpRcvr.setupCalled)
-        {
-            ret += udpRcvr.status();
-            if(!udpRcvr.healthCheck())
-            {
-                if(debug) *debugout << currentTime() << ": Status unhealthy due to UDP receiver health check returning False." << std::endl;
-                healthy = false;
-            }
-        }
-    }
+    healthy = udpRcvr.healthCheck();
+    ret += udpRcvr.status();
 
     // Add to our return string some stats on the tunnels, and mark tunnels for cleanup if they've timed out.
     // Check their cookie caches as well, and purge stale entries.
@@ -102,13 +84,24 @@ std::string GeneveHandler::check()
             if(debug) *debugout << currentTime() << ": Status unhealthy due to Tunnel In for " << ti.second->devname << " health check returning False." << std::endl;
             healthy = false;
         }
+#ifndef NO_RETURN_TRAFFIC
         ret += tunnelOut[ti.first]->status();
         if(!tunnelOut[ti.first]->healthCheck())
         {
             if(debug) *debugout << currentTime() << ": Status unhealthy due to Tunnel Out for " << ti.second->devname << " health check returning False." << std::endl;
             healthy = false;
         }
+#endif
 
+#ifdef NO_RETURN_TRAFFIC
+        if ((destroyTimeout > 0) && (ti.second->lastPacketTime() < cutoff))
+        {
+            std::string delMsg = "The interface  "s + ti.second->devname + " has timed out and are being deleted.\n"s;
+            std::cout << currentTime() << ": " << delMsg;
+            ret += delMsg;
+            enisToDelete.push_back(ti.first);
+        }
+#else
         if ((destroyTimeout > 0) && (ti.second->lastPacketTime() < cutoff) && (tunnelOut[ti.first]->lastPacketTime() < cutoff))
         {
             std::string delMsg = "The interface pair "s + ti.second->devname + " and "s + tunnelOut[ti.first]->devname + " have timed out and are being deleted.\n"s;
@@ -191,14 +184,21 @@ std::string GeneveHandler::check()
         }
         V6cookieULock.unlock();
         ret += "IPv6 flow cache now contains "s + std::to_string(cookieCount) + " records - "s + std::to_string(purgeCount) + " were just purged.\n"s;
+#endif  // NO_RETURN_TRAFFIC
     }
 
     for (auto &eni : enisToDelete)
     {
         // Call the user-provided callback for interfaces being deleted.
+#ifndef NO_RETURN_TRAFFIC
         destroyCallback(tunnelIn[eni]->devname, tunnelOut[eni]->devname, eni);
+#else
+        destroyCallback(tunnelIn[eni]->devname, "none", eni);
+#endif
         tunnelIn.erase(eni);
+#ifndef NO_RETURN_TRAFFIC
         tunnelOut.erase(eni);
+#endif
     }
 
     return ret;
@@ -255,16 +255,21 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
             auto foundEni = tunnelIn.find(gp.gwlbeEniId);
             if(foundEni == tunnelIn.end())
             {
+#ifndef NO_RETURN_TRAFFIC
                 // Create our seen-flows data (cookies) for this ENI, along with a mutex for multithread data protection.
                 gwlbV4CookiesMutex.emplace(gp.gwlbeEniId, new std::shared_mutex);
                 gwlbV4Cookies.emplace(gp.gwlbeEniId, std::unordered_map<PacketHeaderV4, GwlbData>());
                 gwlbV6CookiesMutex.emplace(gp.gwlbeEniId, new std::shared_mutex);
                 gwlbV6Cookies.emplace(gp.gwlbeEniId, std::unordered_map<PacketHeaderV6, GwlbData>());
+#endif
 
                 // Now create the tunnels
                 try {
+
                     tunnelIn.emplace(gp.gwlbeEniId, new TunInterface(devnamein, GWLB_MTU, tunThreadConfig, std::bind(&GeneveHandler::tunReceiverCallback, this, gp.gwlbeEniId, std::placeholders::_1, std::placeholders::_2)));
+#ifndef NO_RETURN_TRAFFIC
                     tunnelOut.emplace(gp.gwlbeEniId, new TunInterface(devnameout, GWLB_MTU, tunThreadConfig, std::bind(&GeneveHandler::tunReceiverCallback, this, gp.gwlbeEniId, std::placeholders::_1, std::placeholders::_2)));
+#endif
                 }
                 catch (std::exception& e) {
                     std::cerr << currentTime() << ": GWLB : Tunnel creation failed: " << e.what() << std::endl;
@@ -274,7 +279,11 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
                 if(debug) *debugout << currentTime() << ": GWLB : New ENI ID " << std::hex << gp.gwlbeEniId << std::dec << " detected.  New tunnel interfaces " << devnamein << " and " << devnameout << " created." << std::endl;
 
                 // Call the user-provided callback for a new interface pair being created.
+#ifndef NO_RETURN_TRAFFIC
                 createCallback(devnamein, devnameout, gp.gwlbeEniId);
+#else
+                createCallback(devnamein, "none", gp.gwlbeEniId);
+#endif
             }
         }
 
@@ -285,6 +294,7 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
             {
                 auto ph = PacketHeaderV4(pkt + gp.headerLen, pktlen - gp.headerLen);
 
+#ifndef NO_RETURN_TRAFFIC
                 // Is this a new flow?
                 std::shared_lock cookieLock(*gwlbV4CookiesMutex[gp.gwlbeEniId]);
                 auto foundCookie = gwlbV4Cookies[gp.gwlbeEniId].find(ph);
@@ -317,12 +327,14 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
                         if(debug) *debugout << currentTime() << ": GWLB : IPv4 flow " << ph << " exists. Seen " << foundCookie->second.seenCount << " times." << std::endl;
                     }
                 }
+#endif
                 // Route the decap'ed packet to our tun interface.
                 if(pktlen > gp.headerLen)
                     tunnelIn[gp.gwlbeEniId]->writePacket(pkt + gp.headerLen, pktlen - gp.headerLen);
             } else if(iph->ip_v == (unsigned int)6) {
                 auto ph = PacketHeaderV6(pkt + gp.headerLen, pktlen - gp.headerLen);
 
+#ifndef NO_RETURN_TRAFFIC
                 // Is this a new flow?
                 std::shared_lock cookieLock(*gwlbV6CookiesMutex[gp.gwlbeEniId]);
                 auto foundCookie = gwlbV6Cookies[gp.gwlbeEniId].find(ph);
@@ -354,6 +366,7 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
                         if(debug) *debugout << currentTime() << ": GWLB : IPv6 flow " << ph << " exists. Seen " << foundCookie->second.seenCount << " times." << std::endl;
                     }
                 }
+#endif
                 // Route the decap'ed packet to our tun interface.
                 if(pktlen > gp.headerLen)
                     tunnelIn[gp.gwlbeEniId]->writePacket(pkt + gp.headerLen, pktlen - gp.headerLen);
@@ -374,14 +387,17 @@ GeneveHandler::~GeneveHandler()
 {
     for (auto &ti : tunnelIn)
     {
+#ifndef NO_RETURN_TRAFFIC
         destroyCallback(ti.second->devname, tunnelOut[ti.first]->devname, ti.first);
+#else
+        destroyCallback(ti.second->devname, "none", ti.first);
+#endif
     }
-    for (auto &udpRcvr : udpRcvrs)
-    {
-        udpRcvr.shutdown();
-    }
+    udpRcvr.shutdown();
     tunnelIn.clear();
+#ifndef NO_RETURN_TRAFFIC
     tunnelOut.clear();
+#endif
 }
 
 /**
@@ -398,6 +414,10 @@ void GeneveHandler::tunReceiverCallback(uint64_t eniId, unsigned char *pktbuf, s
     if(debug) *debugout << currentTime() << ": Tun : Received a packet of " << pktlen << " bytes for ENI Id:" << std::hex << eniId << std::dec << std::endl;
     if(debug >= DEBUG_VERBOSE) hexDump(*hexout, pktbuf, pktlen, true, currentTime() + ": Tun Packet: ");
 
+#ifdef NO_RETURN_TRAFFIC
+    if(debug) *debugout << currentTime() << ": Tun : Received a packet, but NO_RETURN_TRAFFIC is defined. Discarding." << std::endl;
+    return;
+#else
     // Ignore packets that are not IPv4 or IPv6, or aren't at least long enough to have those sized headers.
     if( pktlen < 20 )
     {
@@ -474,4 +494,5 @@ void GeneveHandler::tunReceiverCallback(uint64_t eniId, unsigned char *pktbuf, s
         if(debug) *debugout << currentTime() << ": Tun : Packet processor has a malformed packet: " << err.what() << std::endl;
         return;
     }
+#endif
 }
