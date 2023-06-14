@@ -60,10 +60,16 @@ main.cpp contains the start of the code, but primarily interfaces with GeneveHan
 That class instantiates UDPPacketReceiver and TunInterface as needed, and generally manages the entire packet handling flow. 
 GenevePacket and PacketHeader handle parsing and validating GENEVE packets and IP packets respectively, and are called by GeneveHandler as needed.
 
-## Security
+## Multithreading
+gwlbtun supports multithreading, and doing so is recommended on multicore systems. You can specify either the number or threads, or a specific affinity for CPU cores, for both the UDP receiver and the tunnel handler threads. You should test to see which set of options work best for your workload, especially if you have additional processes doing processing on the device. 
 
+gwlbtun labels its threads with its name (gwlbtun), and either Uxxx for the UDP threads option which is simply an index, or UAxxx for the UDP affinity option, with the number being the core that thread is set for. The tunnel threads are labeled the same, except with a T instead of a U.
+
+## No return mode
+If you are only interested in the ability to receive traffic to an L3 tunnel interface, and will never send traffic back to GWLB, you can #define NO_RETURN_TRAFFIC in utils.h. This removes the gwo interfaces and all cookie flow tracking, which saves on time used to synchronize that flow tracking table. In testing, this is about a 35% improvement in PPS processing capability, at the expense of the return traffic capability. Note that this puts your appliance in a two-arm mode with GWLB, and also may be doing asymmetric traffic routing, which may have performance implications elsewhere. 
+
+## Security
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
 
 ## License
-
 This library is licensed under the MIT-0 License. See the LICENSE file.
