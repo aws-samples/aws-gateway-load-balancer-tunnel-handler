@@ -26,7 +26,7 @@ extern int debug;
 
 // If only decapsulation is required, i.e. you will never send traffic back to GWLB via the local interfaces,
 // you can define the following symbol to improve performance (GWLBTun no longer needs to track flow cookies, etc.)
-#define NO_RETURN_TRAFFIC
+//#define NO_RETURN_TRAFFIC
 
 // Thread configuration parser and data struct
 #define MAX_THREADS    128
