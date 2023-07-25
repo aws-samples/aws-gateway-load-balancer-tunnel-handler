@@ -9,6 +9,8 @@
 
 #include <cstring>
 #include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <string>
@@ -86,8 +88,10 @@ std::string stringFormat(const std::string& fmt_str, ...) {
 
 
 /**
- * Send a UDP packet, with control over the source and destination.
+ * Send a UDP packet, with control over the source and destination. We have to use a RAW socket for specifying the
+ * source port and it changing constantly.
  *
+ * @param sock Existing socket(AF_INET,SOCK_RAW, IPPROTO_RAW) to use for sending
  * @param from_addr IP address to send the packet from.
  * @param from_port UDP source port to use
  * @param to_addr IP address to send the packet to.
@@ -96,32 +100,51 @@ std::string stringFormat(const std::string& fmt_str, ...) {
  * @param pktLen Payload buffer length
  * @return true if packet was sent successfully, false otherwise.
  */
-bool sendUdp(struct in_addr from_addr, uint16_t from_port, struct in_addr to_addr, uint16_t to_port, unsigned char *pktBuf, ssize_t pktLen)
+bool sendUdp(int sock, struct in_addr from_addr, uint16_t from_port, struct in_addr to_addr, uint16_t to_port, unsigned char *pktBuf, ssize_t pktLen)
 {
     struct sockaddr_in sin, sout;
-    int sock;
+    // int sock;
 
-    if (-1==(sock=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP))) return false;
-    memset(&sin,0,sizeof(sin));
+    // Build the IP header
+    uint8_t packet_buffer[16000];
+    struct iphdr *iph;
+    struct udphdr *udph;
+    iph = (struct iphdr *)&packet_buffer[0];
+    udph = (struct udphdr *)&packet_buffer[sizeof(struct iphdr)];
+    iph->version = 4;
+    iph->ihl = 5;
+    iph->tos = 0;
+    iph->tot_len = htons(sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen);
+    iph->id = 0;
+    iph->frag_off = 0;
+    iph->ttl = 2;
+    iph->protocol = IPPROTO_UDP;
+    iph->check = 0;
+    iph->saddr = 0;   // Filled in automatically by OS
+    iph->daddr = to_addr.s_addr;
 
-    sin.sin_family = AF_INET;
-    sin.sin_port = htobe16(from_port);
-    sin.sin_addr.s_addr = from_addr.s_addr;
-    if (-1==bind(sock,(struct sockaddr *)&sin,sizeof(struct sockaddr_in))) {
-        close(sock);
-        return false;
-    }
+    udph->source = htons(from_port);
+    udph->dest = htons(to_port);
+    udph->len = htons(sizeof(struct udphdr) + pktLen);
 
-    sout.sin_family = AF_INET;
-    sout.sin_port = htobe16(to_port);
-    sout.sin_addr.s_addr = to_addr.s_addr;
-    if (-1==sendto(sock, pktBuf, pktLen, 0, (struct sockaddr *)&sout, sizeof(struct sockaddr_in)))
+    memcpy(&packet_buffer[sizeof(struct iphdr) + sizeof(struct udphdr)], pktBuf, pktLen);
+
+    // Linux will return an EINVAL if we have an addr with a non-zero sin_port.
+    struct sockaddr_in to_zero_port;
+    to_zero_port.sin_family = AF_INET;
+    to_zero_port.sin_port = 0;
+    to_zero_port.sin_addr.s_addr = to_addr.s_addr;
+
+    if(sendto(sock, packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen, 0, (struct sockaddr *)&to_zero_port, sizeof(to_zero_port)) < 0)
     {
-        close(sock);
+        /* Leaving this here in case the above ever needs to be debugged again.
+        perror("Unable to send UDP packet");
+        printf("Parameters were %d, %p, %d, %d, %d, %d\nPacket dump:", sock, packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen, 0, (struct sockaddr *)&to_addr, sizeof(to_addr));
+        hexDump(std::clog, packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen, true, currentTime() + ": UDP Packet: ");
+         */
         return false;
     }
 
-    close(sock);
     return true;
 }
 

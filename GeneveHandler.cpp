@@ -54,6 +54,11 @@ GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallba
           tunThreadConfig(std::move(tunThreads))
 {
     // Set up UDP receiver threads.
+#ifndef NO_RETURN_TRAFFIC
+    sendingSock = socket(AF_INET,SOCK_RAW, IPPROTO_RAW);
+    if(sendingSock == -1)
+        throw std::runtime_error("Unable to allocate a socket for sending UDP traffic.");
+#endif
     udpRcvr.setup(udpThreads, GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6));
 }
 
@@ -449,7 +454,7 @@ void GeneveHandler::tunReceiverCallback(uint64_t eniId, unsigned char *pktbuf, s
                     // Copy the packet in after the Geneve header.
                     memcpy(genevePkt + got->second.gp.headerLen, pktbuf, pktlen);
                     // Swap source and destination IP addresses, but preserve ports, and send back to GWLB.
-                    sendUdp(got->second.dstAddr, got->second.srcPort, got->second.srcAddr, got->second.dstPort, genevePkt,
+                    sendUdp(sendingSock, got->second.dstAddr, got->second.srcPort, got->second.srcAddr, got->second.dstPort, genevePkt,
                             pktlen + got->second.gp.headerLen);
 
                     delete [] genevePkt;
@@ -477,7 +482,7 @@ void GeneveHandler::tunReceiverCallback(uint64_t eniId, unsigned char *pktbuf, s
                     // Copy the packet in after the Geneve header.
                     memcpy(genevePkt + got->second.gp.headerLen, pktbuf, pktlen);
                     // Swap source and destination IP addresses, but preserve ports, and send back to GWLB.
-                    sendUdp(got->second.dstAddr, got->second.srcPort, got->second.srcAddr, got->second.dstPort, genevePkt,
+                    sendUdp(sendingSock, got->second.dstAddr, got->second.srcPort, got->second.srcAddr, got->second.dstPort, genevePkt,
                             pktlen + got->second.gp.headerLen);
 
                     delete [] genevePkt;

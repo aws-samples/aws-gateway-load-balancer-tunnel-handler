@@ -44,10 +44,13 @@ private:
     void udpReceiverCallback(unsigned char *pktbuf, ssize_t pktlen, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort);
     void tunReceiverCallback(uint64_t, unsigned char *pktbuf, ssize_t pktlen);
 
+
     // Storage, keyed by ENI id.
     std::shared_mutex eniIdLock;   // Used to access elements of the 3 unordered maps below.
     std::unordered_map<uint64_t, std::unique_ptr<TunInterface>> tunnelIn;
 #ifndef NO_RETURN_TRAFFIC
+    // Socket used by all threads for sending
+    int sendingSock;
     std::unordered_map<uint64_t, std::unique_ptr<TunInterface>> tunnelOut;
     std::unordered_map<uint64_t, std::unique_ptr<std::shared_mutex>> gwlbV4CookiesMutex;   // These mutexes protect the gwlbV4Cookies below.
     std::unordered_map<uint64_t, std::unordered_map<PacketHeaderV4, GwlbData>> gwlbV4Cookies;

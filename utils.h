@@ -37,7 +37,7 @@ typedef struct ThreadConfigStruct {
 std::ostream& hexDump(std::ostream& os, const void *buffer,
                       std::size_t bufsize, bool showPrintableChars = true, const std::string& prefix = ""s);
 std::string stringFormat(const std::string& fmt_str, ...);
-bool sendUdp(struct in_addr from_addr, uint16_t from_port, struct in_addr to_addr, uint16_t to_port, unsigned char *pktBuf, ssize_t pktLen);
+bool sendUdp(int sock, struct in_addr from_addr, uint16_t from_port, struct in_addr to_addr, uint16_t to_port, unsigned char *pktBuf, ssize_t pktLen);
 std::string toBase60(uint64_t val);
 std::string timepointDelta(std::chrono::steady_clock::time_point t1, std::chrono::steady_clock::time_point t2);
 std::string currentTime();
