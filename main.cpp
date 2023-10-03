@@ -13,16 +13,12 @@
 #include "utils.h"
 #include <csignal>
 #include <cstring>
+#include "Logger.h"
 
 using namespace std::string_literals;
 
-// Default debug output to /dev/null - if the -d flag gets passed, this pointer is changed to stderr.
-std::ofstream dev_null("/dev/null");
-std::ostream *debugout = &dev_null;
-std::ostream *hexout = &dev_null;
 std::string newCmd = "";
 std::string delCmd = "";
-int debug = 0;
 volatile sig_atomic_t keepRunning = 1;
 
 /**
@@ -32,13 +28,13 @@ volatile sig_atomic_t keepRunning = 1;
  * @param egressInt New egress interface.
  * @param eniId ENI ID of the new endpoint.
  */
-void newInterfaceCallback(std::string ingressInt, const std::string egressInt, uint64_t eniId)
+void newInterfaceCallback(std::string ingressInt, const std::string egressInt, eniid_t eniId)
 {
-    std::cout << "New interface " << ingressInt << " and " << egressInt << " for ENI ID " << std::hex << std::setw(17) << std::setfill('0') << eniId << std::dec << " created." << std::endl;
+    LOG(LS_CORE, LL_IMPORTANT, "New interface "s + ingressInt + " and "s + egressInt + " for ENI ID "s  + MakeENIStr(eniId) +  " created."s);
     if(newCmd.length() > 0)
     {
         std::stringstream ss;
-        ss << newCmd << " CREATE " << ingressInt << " " << egressInt << " " << std::hex << std::setw(17) << std::setfill('0') << eniId << std::dec;
+        ss << newCmd << " CREATE " << ingressInt << " " << egressInt << " " << MakeENIStr(eniId);
         system(ss.str().c_str());
     }
 }
@@ -49,13 +45,13 @@ void newInterfaceCallback(std::string ingressInt, const std::string egressInt, u
  * @param egressInt Old egress interface.
  * @param eniId Old ENI ID.
  */
-void deleteInterfaceCallback(std::string ingressInt, const std::string egressInt, uint64_t eniId)
+void deleteInterfaceCallback(std::string ingressInt, const std::string egressInt, eniid_t eniId)
 {
-    std::cout << "Removing interface " << ingressInt << " and " << egressInt << " for ENI ID " << std::hex << std::setw(17) << std::setfill('0') << eniId << std::dec << "." << std::endl;
+    LOG(LS_CORE, LL_IMPORTANT, "Removing interface "s + ingressInt + " and "s + egressInt + " for ENI ID "s + MakeENIStr(eniId) + "."s);
     if(delCmd.length() > 0)
     {
         std::stringstream ss;
-        ss << delCmd << " DESTROY " << ingressInt << " " << egressInt << " " << std::hex << std::setw(17) << std::setfill('0') << eniId << std::dec;
+        ss << delCmd << " DESTROY " << ingressInt << " " << egressInt << " " << MakeENIStr(eniId);
         system(ss.str().c_str());
     }
 }
@@ -109,8 +105,7 @@ void printHelp(char *progname)
             "             Note the actual time between last packet and the destroy call may be longer than this time.\n"
             "  -p PORT    Listen to TCP port PORT and provide a health status report on it.\n"
             "  -s         Only return simple health check status (only the HTTP response code), instead of detailed statistics.\n"
-            "  -d         Enable debugging output.\n"
-            "  -x         Enable dumping the hex payload of packets being processed.\n"
+            "  -d         Enable debugging output. Short version of --logging all=debug.\n"
             "\n"
             "Threading options:\n"
             "  --udpthreads NUM         Generate NUM threads for the UDP receiver.\n"
@@ -122,6 +117,8 @@ void printHelp(char *progname)
             "It is recommended to have the same number of UDP threads as tunnel processor threads, in one-arm operation.\n"
             "If unspecified, --udpthreads %d and --tunthreads %d will be assumed as a default, based on the number of cores present.\n"
             "\n"
+            "Logging options:\n"
+            "  --logging CONFIG         Set the logging configuration, as described below.\n"
 #ifdef NO_RETURN_TRAFFIC
             "This version of GWLBTun has been compiled with NO_RETURN_TRAFFIC defined.\n"
 #endif
@@ -138,7 +135,9 @@ void printHelp(char *progname)
             "\n"
             "The <X> in the interface name is replaced with the base 60 encoded ENI ID (to fit inside the 15 character\n"
             "device name limit).\n"
+            "---------------------------------------------------------------------------------------------------------\n"
             , progname, progname, numCores(), numCores());
+    fprintf(stderr, logger->help().c_str());
 }
 
 /**
@@ -151,14 +150,16 @@ void shutdownHandler(int sig)
     keepRunning = 0;
 }
 
+class Logger *logger;
+
 int main(int argc, char *argv[])
 {
     int c;
     int healthCheck = 0, healthSocket;
     int tunnelTimeout = 0;
     int udpthreads = numCores(), tunthreads = numCores();
-    std::string udpaffinity, tunaffinity;
-    bool detailedHealth = true;
+    std::string udpaffinity, tunaffinity, logoptions;
+    bool detailedHealth = true, printHelpFlag = false;
 
     static struct option long_options[] = {
             {"cmdnew", required_argument, NULL, 'c'},
@@ -166,13 +167,13 @@ int main(int argc, char *argv[])
             {"timeout", required_argument, NULL, 't'},
             {"port", required_argument, NULL, 'p'},
             {"debug", no_argument, NULL, 'd'},
-            {"hex", no_argument, NULL, 'x'},
             {"help", no_argument, NULL, 'h'},
             {"help", no_argument, NULL, '?'},
-            {"udpthreads", required_argument, NULL, 0},    // optind 8
-            {"udpaffinity", required_argument, NULL, 0},   // optind 9
-            {"tunthreads", required_argument, NULL, 0},    // optind 10
-            {"tunaffinity", required_argument, NULL, 0},   // optind 11
+            {"udpthreads", required_argument, NULL, 0},    // optind 7
+            {"udpaffinity", required_argument, NULL, 0},   // optind 8
+            {"tunthreads", required_argument, NULL, 0},    // optind 9
+            {"tunaffinity", required_argument, NULL, 0},   // optind 10
+            {"logging", required_argument, NULL, 0},       // optind 11
             {0, 0, 0, 0}
     };
 
@@ -185,17 +186,20 @@ int main(int argc, char *argv[])
             case 0:
                 // Long option
                 switch(optind) {
-                    case 8:
+                    case 7:
                         udpthreads = atoi(optarg);
                         break;
-                    case 9:
+                    case 8:
                         udpaffinity = std::string(optarg);
                         break;
-                    case 10:
+                    case 9:
                         tunthreads = atoi(optarg);
                         break;
-                    case 11:
+                    case 10:
                         tunaffinity = std::string(optarg);
+                        break;
+                    case 11:
+                        logoptions = std::string(optarg);
                         break;
                 }
                 break;
@@ -215,19 +219,22 @@ int main(int argc, char *argv[])
                 detailedHealth = false;
                 break;
             case 'd':
-                debugout = &std::clog;
-                if(debug < DEBUG_ON) debug = DEBUG_ON;
-                break;
-            case 'x':
-                hexout = &std::clog;
-                if(debug < DEBUG_VERBOSE) debug = DEBUG_VERBOSE;
+                logoptions = "all=debug";
                 break;
             case '?':
             case 'h':
             default:
-                printHelp(argv[0]);
-                exit(EXIT_FAILURE);
+                printHelpFlag = true;
+                break;
         }
+    }
+
+    logger = new Logger(logoptions);
+
+    if(printHelpFlag)
+    {
+        printHelp(argv[0]);
+        exit(EXIT_FAILURE);
     }
 
     // Set up for health check reporting, if requested. We listen on both IPv4 and IPv6 for completeness, although
@@ -236,7 +243,7 @@ int main(int argc, char *argv[])
     {
         if((healthSocket = socket(AF_INET6, SOCK_STREAM, 0)) == 0)
         {
-            perror("Creating health check socket failed");
+            LOG(LS_CORE, LL_CRITICAL, "Creating health check socket failed: "s + std::strerror(errno));
             exit(EXIT_FAILURE);
         }
 
@@ -248,7 +255,7 @@ int main(int argc, char *argv[])
         addr.sin6_addr = in6addr_any;
         if(bind(healthSocket, (struct sockaddr *)&addr, sizeof(addr)) < 0)
         {
-            perror("Unable to listen to health status port");
+            LOG(LS_CORE, LL_CRITICAL, "Unable to listen to health status port: "s + std::strerror(errno));
             exit(EXIT_FAILURE);
         }
         listen(healthSocket, 3);
@@ -282,7 +289,7 @@ int main(int argc, char *argv[])
             struct sockaddr_in6 from;
             socklen_t fromlen = sizeof(from);
             hsClient = accept(healthSocket, (struct sockaddr *)&from, &fromlen);
-            *debugout << currentTime() << ": Processing a health check client for " << sockaddrToName((struct sockaddr *)&from) << std::endl;
+            LOG(LS_HEALTHCHECK, LL_DEBUG, "Processing a health check client for " + sockaddrToName((struct sockaddr *)&from));
             performHealthCheck(detailedHealth, gh, hsClient);
             close(hsClient);
             ticksSinceCheck = 60;
@@ -291,17 +298,16 @@ int main(int argc, char *argv[])
         ticksSinceCheck --;
         if(ticksSinceCheck < 0)
         {
-            std::string hcText = currentTime() + ": "s + gh->check();
-            *debugout << hcText;
+            LOG(LS_HEALTHCHECK, LL_DEBUG, gh->check());
             ticksSinceCheck = 60;
         }
     }
 
     // The loop was interrupted (most likely by Ctrl-C or likewise).  Clean up a few things.
-    printf("Shutting down...\n");
+    LOG(LS_CORE, LL_IMPORTANT, "Shutting down.");
     delete(gh);
     if(healthCheck > 0) close(healthSocket);
-    printf("Shutdown complete.\n");
+    LOG(LS_CORE, LL_IMPORTANT, "Shutdown complete.");
 
     return 0;
 }

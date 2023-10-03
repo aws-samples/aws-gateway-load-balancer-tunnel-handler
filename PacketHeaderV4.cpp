@@ -27,7 +27,7 @@ PacketHeaderV4::PacketHeaderV4(unsigned char *pktbuf, ssize_t pktlen)
 {
     struct ip *iph = (struct ip *)pktbuf;
 
-    if(pktlen < sizeof(struct ip))
+    if(pktlen < (ssize_t)sizeof(struct ip))
         throw std::invalid_argument("PacketHeaderV4 provided a packet too small to be an IPv4 packet.");
 
     if(iph->ip_v != 4)
@@ -40,7 +40,7 @@ PacketHeaderV4::PacketHeaderV4(unsigned char *pktbuf, ssize_t pktlen)
     {
         case IPPROTO_UDP:
         {
-            if(pktlen < sizeof(struct ip) + sizeof(struct udphdr))
+            if(pktlen < (ssize_t)(sizeof(struct ip) + sizeof(struct udphdr)))
                 throw std::invalid_argument("PacketHeaderV4 provided a packet with protocol=UDP, but too small to carry UDP information.");
             struct udphdr *udp = (struct udphdr *)(pktbuf + sizeof(struct ip));
             srcpt = be16toh(udp->uh_sport);
@@ -49,7 +49,7 @@ PacketHeaderV4::PacketHeaderV4(unsigned char *pktbuf, ssize_t pktlen)
         }
         case IPPROTO_TCP:
         {
-            if(pktlen < sizeof(struct ip) + sizeof(struct tcphdr))
+            if(pktlen < (ssize_t)(sizeof(struct ip) + sizeof(struct tcphdr)))
                 throw std::invalid_argument("PacketHeaderV4 provided a packet with protocol=TCP, but too small to carry UDP information.");
             struct tcphdr *tcp = (struct tcphdr *)(pktbuf + sizeof(struct ip));
             srcpt = be16toh(tcp->th_sport);
@@ -63,20 +63,6 @@ PacketHeaderV4::PacketHeaderV4(unsigned char *pktbuf, ssize_t pktlen)
             break;
         }
     }
-}
-
-PacketHeaderV4::PacketHeaderV4(uint8_t prot, uint32_t src, uint32_t dst, uint16_t srcpt, uint16_t dstpt)
-: src(src), dst(dst), srcpt(srcpt), dstpt(dstpt), prot(prot)
-{
-}
-
-/***
- * Return a new packet header with the src/dst ips and ports swapped (i.e. this flow in the reverse direction)
- * @return A new PacketHeaderV4 object
- */
-PacketHeaderV4 PacketHeaderV4::reverse() const
-{
-    return PacketHeaderV4(prot, dst, src, dstpt, srcpt);
 }
 
 /**
@@ -145,6 +131,11 @@ std::ostream &operator<<(std::ostream &os, PacketHeaderV4 const &m)
  * Extend std::hash for PacketHeaderV4
  */
 std::size_t std::hash<PacketHeaderV4>::operator()(const PacketHeaderV4& t) const
+{
+    return t.hash();
+};
+
+std::size_t hash_value(const PacketHeaderV4& t)
 {
     return t.hash();
 };

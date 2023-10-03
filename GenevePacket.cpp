@@ -11,6 +11,12 @@
 
 #include "GenevePacket.h"
 #include <cstring>
+#include "utils.h"
+
+/**
+ * Empty initializer
+ */
+GenevePacket::GenevePacket() : status(GP_STATUS_EMPTY) { }
 
 /**
  * Interpret the packet as a GENEVE packet. Does sanity checks to ensure the packet is correct. Callers should
@@ -116,6 +122,13 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
         status = GP_STATUS_OK;
 }
 
+std::string GenevePacket::text()
+{
+    std::ostringstream ss;
+    ss << " Status: " << (status) << std::hex << " GWLBe ENI ID: " << (MakeENIStr(gwlbeEniIdValid?gwlbeEniId:0)) << " Attachment ID: " << (attachmentIdValid?attachmentId:0) << " Flow Cookie: " << (flowCookieValid?flowCookie:0) << std::dec;
+    return ss.str();
+}
+
 /**
  * Output a human-readable string of the contents of this GenevePacket.
  *
@@ -125,6 +138,6 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
  */
 auto operator<<(std::ostream& os, GenevePacket const& m) -> std::ostream&
 {
-    return os << " Status: " << (m.status) << std::hex << " GWLBe ENI ID: " << (m.gwlbeEniIdValid?m.gwlbeEniId:0) << " Attachment ID: " << (m.attachmentIdValid?m.attachmentId:0) << " Flow Cookie: " << (m.flowCookieValid?m.flowCookie:0) << std::dec;
+    return os << " Status: " << (m.status) << std::hex << " GWLBe ENI ID: " << (MakeENIStr(m.gwlbeEniIdValid?m.gwlbeEniId:0)) << " Attachment ID: " << (m.attachmentIdValid?m.attachmentId:0) << " Flow Cookie: " << (m.flowCookieValid?m.flowCookie:0) << std::dec;
 }
 

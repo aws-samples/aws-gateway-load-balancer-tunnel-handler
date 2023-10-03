@@ -9,7 +9,9 @@
 #include <chrono>
 #include <shared_mutex>
 #include <unistd.h>
+#include <boost/unordered/concurrent_flat_map.hpp>
 #include "utils.h"
+
 
 typedef std::function<void(unsigned char *pktbuf, ssize_t pktlen)> tunCallback;
 
@@ -44,7 +46,6 @@ public:
     ~TunInterface();
 
     void writePacket(unsigned char *pkt, ssize_t pktlen);
-    bool healthCheck();
     std::string status();
     void shutdown();
 
@@ -55,8 +56,7 @@ private:
     std::atomic<std::chrono::steady_clock::time_point> lastPacket;
     std::atomic<uint64_t> pktsOut, bytesOut;
     std::array<class TunInterfaceThread, MAX_THREADS> threads;
-    std::shared_mutex writerHandlesMutex;
-    std::unordered_map<pthread_t, int> writerHandles;
+    boost::concurrent_flat_map<pthread_t, int> writerHandles;
     int allocateHandle();
 };
 

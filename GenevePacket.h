@@ -10,6 +10,8 @@
 #include <netinet/ip.h>
 #include <iostream>
 
+typedef uint64_t eniid_t;
+
 // Storage for options seen in a Geneve header.
 struct GeneveOption {
     uint16_t optClass;           // Option class, converted to host format
@@ -21,6 +23,7 @@ struct GeneveOption {
 
 class GenevePacket {
 public:
+    GenevePacket();
     GenevePacket(unsigned char *pktBuf, ssize_t pktLen);   // pktBuf points to the start of the Geneve header (i.e. after the outer UDP header)
 
     int status;
@@ -28,10 +31,12 @@ public:
     std::vector<struct GeneveOption> geneveOptions;   // Parsed options from the Geneve header.
     uint32_t geneveVni;          // The outer VNI identifier from the Geneve header.
     bool gwlbeEniIdValid, attachmentIdValid, flowCookieValid;   // False if the options weren't found (and the below values MUST NOT be used), or true if they were.
-    uint64_t gwlbeEniId;         // The GWLBE ENI ID option, if it was found (check via the valid boolean)
+    eniid_t gwlbeEniId;         // The GWLBE ENI ID option, if it was found (check via the valid boolean)
     uint64_t attachmentId;       // The attachment ID option, if it was found
     uint32_t flowCookie;         // The flow cookie, if it was found
     std::vector<unsigned char>header;   // Copy of the Geneve header to put back on packets
+
+    std::string text();
     friend auto operator<<(std::ostream& os, GenevePacket const& m) -> std::ostream&;
 };
 

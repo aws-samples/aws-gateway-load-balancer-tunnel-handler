@@ -18,7 +18,6 @@ public:
     bool operator==(const PacketHeaderV6 &) const;
     std::string text() const;
     std::size_t hash() const;
-    PacketHeaderV6 reverse() const;   // Return a PH for the reverse flow direction (src/dst ips and ports swapped)
 
 private:
     struct in6_addr src;
@@ -27,11 +26,10 @@ private:
     uint16_t  srcpt;
     uint16_t  dstpt;
     uint8_t   prot;
-
-    PacketHeaderV6(uint8_t prot, uint32_t flow, struct in6_addr src, struct in6_addr dst, uint16_t srcpt, uint16_t dstpt);
 };
 
 std::ostream &operator<<(std::ostream &os, PacketHeaderV6 const &m);
 template<> struct std::hash<PacketHeaderV6>:unary_function<PacketHeaderV6, size_t> { std::size_t operator()(const PacketHeaderV6& t) const; };
+std::size_t hash_value(const PacketHeaderV6& t);
 
 #endif //GWLBTUN_PACKETHEADERV6_H

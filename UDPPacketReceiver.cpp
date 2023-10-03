@@ -17,6 +17,7 @@
 #include <utility>
 #include <thread>
 #include "utils.h"
+#include "Logger.h"
 
 using namespace std::string_literals;
 
@@ -39,7 +40,7 @@ UDPPacketReceiver::~UDPPacketReceiver()
 
 void UDPPacketReceiver::shutdown()
 {
-    // Signal all threads to shutdown down, then wait for all acks.
+    // Signal all threads to shutdown, then wait for all acks.
     for(auto &thread : threads)
     {
         thread.shutdown();
@@ -70,7 +71,7 @@ void UDPPacketReceiver::shutdown()
  */
 void UDPPacketReceiver::setup(ThreadConfig threadConfig, uint16_t portNumberParam, udpCallback recvDispatcherParam)
 {
-    if(debug) *debugout << currentTime() << ": UDP receiver setting up on port "s << std::to_string(portNumberParam) << std::endl;
+    LOG(LS_UDP, LL_DEBUG, "UDP receiver setting up on port "s + ts(portNumberParam));
     portNumber = portNumberParam;
 
     // Set up our threads as per threadConfig
@@ -141,7 +142,7 @@ UDPPacketReceiverThread::~UDPPacketReceiverThread()
         auto status = thread.wait_for(std::chrono::seconds(2));
         while(status == std::future_status::timeout)
         {
-            std::cerr << currentTime() << ": UDP receiver thread "s << std::to_string(threadNumber) << " has not yet shutdown - waiting more."s << std::endl;
+            LOG(LS_UDP, LL_DEBUG, "UDP receiver thread "s + ts(threadNumber) + " has not yet shutdown - waiting more."s);
             status = thread.wait_for(std::chrono::seconds(1));
         }
     }
@@ -212,7 +213,7 @@ int UDPPacketReceiverThread::threadFunction()
         int s = pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
         if(s != 0)
         {
-            std::cerr << "Unable to set UDP thread CPU affinity to core "s << std::to_string(coreNumber) << ": "s << std::error_code{errno, std::generic_category()}.message() << ". Thread continuing to run with affinity unset."s << std::endl;
+            LOG(LS_UDP, LL_IMPORTANT, "Unable to set thread CPU affinity to core "s  + ts(coreNumber) + ": "s + std::error_code{errno, std::generic_category()}.message() + ". Thread continuing to run with affinity unset."s);
         } else {
             snprintf(threadName, 15, "gwlbtun UA%03d", coreNumber);
             pthread_setname_np(pthread_self(), threadName);
@@ -261,7 +262,7 @@ int UDPPacketReceiverThread::threadFunction()
                                 recvDispatcher(pktbuf, msgLen, &src_addr4->sin_addr, be16toh(src_addr4->sin_port), &ipi->ipi_spec_dst, portNumber);
                             }
                             catch (std::exception& e) {
-                                std::cerr << currentTime() << ": UDP packet dispatch function failed: " << e.what() << std::endl;
+                                LOG(LS_UDP, LL_IMPORTANT, "UDP packet dispatch function failed: "s + e.what());
                             }
                         }
                         cmhdr = CMSG_NXTHDR(&mh, cmhdr);

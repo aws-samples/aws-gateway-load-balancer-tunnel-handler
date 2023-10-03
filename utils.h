@@ -13,16 +13,9 @@
 #include <cstdarg>  // For va_start, etc.
 #include <chrono>
 #include <vector>
+#include "GenevePacket.h"   // For eniid_t
 
 using namespace std::string_literals;
-
-extern std::ofstream dev_null;
-extern std::ostream *debugout;
-extern std::ostream *hexout;
-extern int debug;
-
-#define DEBUG_ON       1
-#define DEBUG_VERBOSE  2
 
 // If only decapsulation is required, i.e. you will never send traffic back to GWLB via the local interfaces,
 // you can define the following symbol to improve performance (GWLBTun no longer needs to track flow cookies, etc.)
@@ -34,15 +27,15 @@ typedef struct ThreadConfigStruct {
     std::vector<int> cfg;
 } ThreadConfig;
 
-std::ostream& hexDump(std::ostream& os, const void *buffer,
-                      std::size_t bufsize, bool showPrintableChars = true, const std::string& prefix = ""s);
 std::string stringFormat(const std::string& fmt_str, ...);
+std::string stringFormat(const std::string& fmt_str, va_list ap);
 bool sendUdp(int sock, struct in_addr from_addr, uint16_t from_port, struct in_addr to_addr, uint16_t to_port, unsigned char *pktBuf, ssize_t pktLen);
 std::string toBase60(uint64_t val);
 std::string timepointDelta(std::chrono::steady_clock::time_point t1, std::chrono::steady_clock::time_point t2);
-std::string currentTime();
 std::string sockaddrToName(struct sockaddr *sa);
 void ParseThreadConfiguration(int threadcount, std::string& affinity, ThreadConfig *dest);
+std::string MakeENIStr(eniid_t eni);
+int VectorIndexI(std::vector<std::string> vector, std::string search);
 
 // If hashFunc is a function that does not result in the same hash for both flow directions,
 // #undef the next line so that GeneveHandler and PacketHeader changes their logic appropriately.

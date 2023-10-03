@@ -4,7 +4,7 @@ This software supports using the Gateway Load Balancer AWS service. It is design
 See the 'example-scripts' folder for some of the options that can be used as create scripts for this software.
 
 ## To Compile
-On an Amazon Linux 2 host, copy this code down, and install dependencies:
+On an Amazon Linux 2 or AL2023 host, copy this code down, and install dependencies:
 
 ```
 sudo yum groupinstall "Development Tools"
@@ -13,6 +13,7 @@ sudo yum install cmake3
 
 In the directory with the source code, do ```cmake3 .; make``` to build. This code works with both Intel and Graviton-based architectures.
 
+**This version requires the Boost libraries, version 1.83.0 or greater.** This tends to be a newer version than available on distributions (for example, at time of writing, 1.75 is available in AL2023). You may need to go to https://www.boost.org/, download, and install a newer version than what's available in the repositories  
 
 ## Usage
 For Linux, the application requires CAP_NET_ADMIN capability to create the tunnel interfaces along with the example helper scripts.
@@ -28,7 +29,7 @@ Example: ./gwlbtun
              Note the actual time between last packet and the destroy call may be longer than this time.
   -p PORT    Listen to TCP port PORT and provide a health status report on it.
   -s         Only return simple health check status (only the HTTP response code), instead of detailed statistics.
-  -d         Enable debugging output.
+  -d         Enable debugging output. Short version of --logging all=debug.
   -x         Enable dumping the hex payload of packets being processed.
 
 Threading options:
@@ -39,7 +40,10 @@ Threading options:
 
 AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.
 It is recommended to have the same number of UDP threads as tunnel processor threads, in one-arm operation.
+If unspecified, --udpthreads 2 and --tunthreads 2 will be assumed as a default, based on the number of cores present.
 
+Logging options:
+  --logging CONFIG         Set the logging configuration, as described below.
 ---------------------------------------------------------------------------------------------------------
 Hook scripts arguments:
 These arguments are provided when gwlbtun calls the hook scripts (the -c <FILE> and/or -r <FILE> command options).
@@ -53,12 +57,19 @@ The hook scripts will be called with the following arguments:
 
 The <X> in the interface name is replaced with the base 60 encoded ENI ID (to fit inside the 15 character
 device name limit).
+---------------------------------------------------------------------------------------------------------
+The logging configuration can be set by passing a string to the --logging option. That string is a series of <section>=<level>, comma separated and case insensitive.
+The available sections are: core udp geneve tunnel healthcheck all 
+The logging levels available for each are: critical important info debug debugdetail 
+The default level for all secions is 'important'.
 ```
 
 ## Source code layout
 main.cpp contains the start of the code, but primarily interfaces with GeneveHandler, defined in GeneveHandler.cpp. 
-That class instantiates UDPPacketReceiver and TunInterface as needed, and generally manages the entire packet handling flow. 
+That class launches the multithreaded UDP receiver, and then creates GeneveHandlerENI class instances per GWLB ENI detected.
+The GeneveHandlerENI class instantiates the TunInterfaces as needed, and generally manages the entire packet handling flow for that ENI. 
 GenevePacket and PacketHeader handle parsing and validating GENEVE packets and IP packets respectively, and are called by GeneveHandler as needed.
+Logger handles processing logging messages from all threads, ensuring they get output correctly to terminal, and filtering against the logging configuration provided.
 
 ## Multithreading
 gwlbtun supports multithreading, and doing so is recommended on multicore systems. You can specify either the number or threads, or a specific affinity for CPU cores, for both the UDP receiver and the tunnel handler threads. You should test to see which set of options work best for your workload, especially if you have additional processes doing processing on the device. 

@@ -29,7 +29,7 @@ PacketHeaderV6::PacketHeaderV6(unsigned char *pktbuf, ssize_t pktlen)
 {
     struct ip6_hdr *iph6 = (struct ip6_hdr *)pktbuf;
 
-    if(pktlen < sizeof(struct ip6_hdr))
+    if(pktlen < (ssize_t)sizeof(struct ip6_hdr))
         throw std::invalid_argument("PacketHeaderV6 provided a packet too small to be an IPv6 packet.");
 
     if( ((iph6->ip6_ctlun.ip6_un2_vfc & 0xF0) >> 4) != 6)
@@ -46,7 +46,7 @@ PacketHeaderV6::PacketHeaderV6(unsigned char *pktbuf, ssize_t pktlen)
     {
         case IPPROTO_UDP:
         {
-            if(pktlen < sizeof(struct ip6_hdr) + sizeof(struct udphdr))
+            if(pktlen < (ssize_t)(sizeof(struct ip6_hdr) + sizeof(struct udphdr)))
                 throw std::invalid_argument("PacketHeaderV6 provided a packet with protocol=UDP, but too small to carry UDP information.");
             struct udphdr *udp = (struct udphdr *)(pktbuf + sizeof(struct ip6_hdr));
             srcpt = be16toh(udp->uh_sport);
@@ -55,7 +55,7 @@ PacketHeaderV6::PacketHeaderV6(unsigned char *pktbuf, ssize_t pktlen)
         }
         case IPPROTO_TCP:
         {
-            if(pktlen < sizeof(struct ip6_hdr) + sizeof(struct tcphdr))
+            if(pktlen < (ssize_t)(sizeof(struct ip6_hdr) + sizeof(struct tcphdr)))
                 throw std::invalid_argument("PacketHeaderV6 provided a packet with protocol=TCP, but too small to carry UDP information.");
             struct tcphdr *tcp = (struct tcphdr *)(pktbuf + sizeof(struct ip6_hdr));
             srcpt = be16toh(tcp->th_sport);
@@ -67,20 +67,6 @@ PacketHeaderV6::PacketHeaderV6(unsigned char *pktbuf, ssize_t pktlen)
             dstpt = 0;
             break;
     }
-}
-
-PacketHeaderV6::PacketHeaderV6(uint8_t prot, uint32_t flow, struct in6_addr src, struct in6_addr dst, uint16_t srcpt, uint16_t dstpt)
-        : src(src), dst(dst), flow(flow), srcpt(srcpt), dstpt(dstpt), prot(prot)
-{
-}
-
-/***
- * Return a new packet header with the src/dst ips and ports swapped (i.e. this flow in the reverse direction)
- * @return A new PacketHeaderV4 object
- */
-PacketHeaderV6 PacketHeaderV6::reverse() const
-{
-    return PacketHeaderV6(prot, flow, dst, src, dstpt, srcpt);
 }
 
 /**
@@ -154,6 +140,11 @@ std::ostream &operator<<(std::ostream &os, PacketHeaderV6 const &m)
  * Extend std::hash for PacketHeaderV6
  */
 std::size_t std::hash<PacketHeaderV6>::operator()(const PacketHeaderV6& t) const
+{
+    return t.hash();
+};
+
+std::size_t hash_value(const PacketHeaderV6& t)
 {
     return t.hash();
 };

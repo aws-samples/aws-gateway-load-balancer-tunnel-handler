@@ -22,6 +22,7 @@
 #include <iostream>
 #include <thread>
 #include "utils.h"
+#include "Logger.h"
 
 using namespace std::string_literals;
 
@@ -35,7 +36,7 @@ using namespace std::string_literals;
 TunInterface::TunInterface(std::string devname, int mtu, ThreadConfig threadConfig, tunCallback recvDispatcherParam)
 : lastPacket(std::chrono::steady_clock::now()),pktsOut(0),bytesOut(0)
 {
-    if(debug) *debugout << currentTime() << ": TunInterface creating for "s << devname << std::endl;
+    LOG(LS_TUNNEL, LL_DEBUG, "TunInterface creating for "s + devname);
     this->devname = devname;
 
     // Set up our threads as per threadConfig
@@ -79,10 +80,7 @@ TunInterface::~TunInterface()
 
 void TunInterface::shutdown()
 {
-    if(debug)
-    {
-        *debugout << currentTime() << ": TunInterface destroying for "s << devname << std::endl;
-    }
+    LOG(LS_TUNNEL, LL_DEBUG, "TunInterface destroying for "s + devname);
 
     // Signal all threads to shutdown down, then wait for all acks.
     for(auto &thread : threads)
@@ -115,55 +113,15 @@ void TunInterface::shutdown()
  */
 void TunInterface::writePacket(unsigned char *pkt, ssize_t pktlen)
 {
-    int targetfd;
-    // We can create a new FD (because we're multi-queue) for the writers, and have one per thread to eliminate the
-    // need for locking.
-    std::shared_lock readLock(writerHandlesMutex);
-    auto foundHandle = writerHandles.find(pthread_self());
-    readLock.unlock();
-    if(foundHandle == writerHandles.end())
+    if(!writerHandles.visit(pthread_self(), [&](auto& targetfd) { write(targetfd.second, (void *)pkt, pktlen); }))
     {
-        // Get a write lock, and reverify we still need to create.
-        std::unique_lock writeLock(writerHandlesMutex);
-        foundHandle = writerHandles.find(pthread_self());
-        if(foundHandle == writerHandles.end())
-        {
-            // Create.
-            targetfd = allocateHandle();
-            writerHandles.emplace(pthread_self(), targetfd);
-        } else {
-            targetfd = foundHandle->second;
-        }
-        writeLock.unlock();
-    } else {
-        targetfd = foundHandle->second;
+        // Key wasn't found - create and send.
+        int targetfd = allocateHandle();
+        writerHandles.emplace(pthread_self(), targetfd);
+        write(targetfd, (void *)pkt, pktlen);
     }
-
-    // Write the packet.
     lastPacket = std::chrono::steady_clock::now();
     pktsOut ++; bytesOut += pktlen;
-    write(targetfd, (void *)pkt, pktlen);
-}
-
-/**
- * Check on the status of the TUN receiver thread.
- *
- * @return true if the thread is still alive, false otherwise.
- */
-bool TunInterface::healthCheck()
-{
-    bool status = true;
-
-    for(auto &t : threads)
-    {
-        if(t.setupCalled)
-        {
-            if(!t.healthCheck())
-                status = false;
-        }
-    }
-
-    return status;
 }
 
 /**
@@ -229,7 +187,7 @@ TunInterfaceThread::~TunInterfaceThread() noexcept
         auto status = thread.wait_for(std::chrono::seconds(2));
         while(status == std::future_status::timeout)
         {
-            std::cerr << currentTime() << ": Tunnel thread "s << std::to_string(threadNumber) << " has not yet shutdown - waiting more."s << std::endl;
+            LOG(LS_TUNNEL, LL_INFO, "Tunnel thread "s + ts(threadNumber) + " has not yet shutdown - waiting more."s);
             status = thread.wait_for(std::chrono::seconds(1));
         }
     }
@@ -260,10 +218,10 @@ void TunInterfaceThread::setup(int threadNumberParam, int coreNumberParam, int f
 int TunInterfaceThread::threadFunction()
 {
     char threadName[16];
-    if(debug) *debugout << currentTime() << ": Tun Thread " << std::to_string(threadNumber) << ": Starting" << std::endl;
     threadId = gettid();
     snprintf(threadName, 15, "gwlbtun T%03d", threadNumber);
     pthread_setname_np(pthread_self(), threadName);
+    LOG(LS_TUNNEL, LL_DEBUG, "Thread starting");
 
     // If a specific core was requested, attempt to set affinity.
     if(coreNumber != -1)
@@ -274,7 +232,7 @@ int TunInterfaceThread::threadFunction()
         int s = pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
         if(s != 0)
         {
-            std::cerr << currentTime() << ": Tun Thread " << std::to_string(threadNumber) << ": Unable to set TUN thread CPU affinity to core "s << std::to_string(coreNumber) << ": "s << std::error_code{errno, std::generic_category()}.message() << ". Thread continuing to run with affinity unset."s << std::endl;
+            LOG(LS_TUNNEL, LL_INFO, "Unable to set TUN thread CPU affinity to core "s + ts(coreNumber) + ": "s + std::error_code{errno, std::generic_category()}.message() + ". Thread continuing to run with affinity unset."s);
         } else {
             snprintf(threadName, 15, "gwlbtun TA%03d", coreNumber);
             pthread_setname_np(pthread_self(), threadName);
@@ -305,12 +263,12 @@ int TunInterfaceThread::threadFunction()
                 recvDispatcher(pktbuf, msgLen);
             }
             catch (std::exception& e) {
-                std::cerr << currentTime() << ": Tun Thread " << std::to_string(threadNumber) << ": Packet dispatch function failed: " << e.what() << std::endl;
+                LOG(LS_TUNNEL, LL_IMPORTANT, "Packet dispatch function failed: "s + e.what());
             }
             pktsIn ++; bytesIn += msgLen;
         }
     }
-    if(debug) *debugout << currentTime() << ": Tun Thread " << std::to_string(threadNumber) << ": Stopping by request" << std::endl;
+    LOG(LS_TUNNEL, LL_DEBUG, "Thread stopping by request");
     delete [] pktbuf;
     return(0);
 }
@@ -374,7 +332,7 @@ int TunInterface::allocateHandle()
     // Code adapted from Linux Documentation/networking/tuntap.txt to create the tun device.
     if((fd = open("/dev/net/tun", O_RDWR)) < 0)
     {
-        std::cerr << currentTime() << ": Unable to open /dev/net/tun " << std::error_code{errno, std::generic_category()}.message() << std::endl;
+        LOG(LS_TUNNEL, LL_CRITICAL, "Unable to open /dev/net/tun "s + std::error_code{errno, std::generic_category()}.message());
         throw std::system_error(errno, std::generic_category(), "Unable to open /dev/net/tun");
     }
 
@@ -383,7 +341,7 @@ int TunInterface::allocateHandle()
 
     if(ioctl(fd, TUNSETIFF, (void *)&ifr) < 0)
     {
-        std::cerr << currentTime() << ": Unable to create TUN device (does this process have CAP_NET_ADMIN capability?)" << std::error_code{errno, std::generic_category()}.message() << std::endl;
+        LOG(LS_TUNNEL, LL_CRITICAL, "Unable to create TUN device " + devname + " (does this process have CAP_NET_ADMIN capability?) " + std::error_code{errno, std::generic_category()}.message());
         throw std::system_error(errno, std::generic_category(), "Unable to create TUN device (does this process have CAP_NET_ADMIN capability?)");
     }
 

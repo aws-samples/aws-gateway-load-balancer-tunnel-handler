@@ -1,3 +1,11 @@
+## 2023.10.03 Release:
+- Replace flow caches with version based on Boost's concurrent_flat_map, improving performance and reducing CPU usage due to time spent waiting for locks.
+- Standardized logging into its own class and thread, with improved configuration options
+- General code cleanup - broke out per ENI handling to its own class (GeneveHandlerENI) which simplified code a fair bit.
+
+## 2023.06.07 Release:
+- Add NO_RETURN_TRAFFIC define by request - this strips out some of the internal tracking and removes the ability to send packets back to GWLB, but increases performance on incoming packet handling.
+
 ## 2022.11.17 Release:
 - **Update to support IPv6 payloads from GWLB**
 - Updated CMakeLists file to cleanly separate Debug and Release build options

@@ -15,51 +15,11 @@
 #include <unistd.h>
 #include <string>
 #include <cstring>
+#include <algorithm>
+#include <iostream>
+#include "Logger.h"
 
 using namespace std::string_literals;
-
-/**
- * Dump the provided object as a hex-formatted output dump.
- *
- * @param os The output stream to send the hex dump to.
- * @param buffer The pointer to the start of the object to dump. nullptr results in no output and an immediate return.
- * @param bufsize The number of bytes in buffer to output
- * @param showPrintableChars Output alongside the hex dump the ASCII strings (unprintable characters are replaced with a '.')
- * @param prefix Any generic string the prefix each line of output with.
- * @return Returns the output stream back. Side effect: The output stream has had the hex dump pushed into it.
- */
-std::ostream& hexDump(std::ostream& os, const void *buffer,
-                      std::size_t bufsize, bool showPrintableChars, const std::string& prefix)
-{
-    if (buffer == nullptr) {
-        return os;
-    }
-
-    char hexBuf[140];
-    char printBuf[36];
-    unsigned char *cBuffer = (unsigned char *)buffer;
-    std::size_t offset;
-
-    for(offset = 0; offset < bufsize; offset ++)
-    {
-        if(offset % 32 == 0)
-        {
-            if(offset > 0) os << prefix << hexBuf << printBuf << std::endl;
-            bzero(hexBuf, 140);
-            bzero(printBuf, 36);
-            if(showPrintableChars) strcpy(printBuf, " | ");
-            snprintf(hexBuf, 7, "%04zx: ", offset);
-        }
-        snprintf(&hexBuf[5+((offset % 32)*3)], 4, " %02x", cBuffer[offset]);
-        if(showPrintableChars)
-            printBuf[3 + (offset % 32)] = (isprint(cBuffer[offset]))?cBuffer[offset]:'.';
-    }
-    // Add in enough padding to make sure our lines line up.
-    for(offset = 5+((offset % 32) * 3); offset < 101; offset ++) hexBuf[offset] = ' ';
-    if(offset > 0) os << prefix << hexBuf << printBuf << std::endl;
-
-    return os;
-}
 
 /**
  * Perform a printf-like function, but on a std::string and returning a std::string
@@ -69,15 +29,23 @@ std::ostream& hexDump(std::ostream& os, const void *buffer,
  * @return A std::string of the formatted output
  */
 std::string stringFormat(const std::string& fmt_str, ...) {
+    va_list ap;
+
+    va_start(ap, &fmt_str);
+    std::string ret = stringFormat(fmt_str, ap);
+    va_end(ap);
+
+    return ret;
+}
+
+std::string stringFormat(const std::string& fmt_str, va_list ap)
+{
     int final_n, n = ((int)fmt_str.size()) * 2; /* Reserve two times as much as the length of the fmt_str */
     std::unique_ptr<char[]> formatted;
-    va_list ap;
     while(true) {
         formatted.reset(new char[n]); /* Wrap the plain char array into the unique_ptr */
         strcpy(&formatted[0], fmt_str.c_str());
-        va_start(ap, &fmt_str);
         final_n = vsnprintf(&formatted[0], n, fmt_str.c_str(), ap);
-        va_end(ap);
         if (final_n < 0 || final_n >= n)
             n += abs(final_n - n + 1);
         else
@@ -85,7 +53,6 @@ std::string stringFormat(const std::string& fmt_str, ...) {
     }
     return std::string(formatted.get());
 }
-
 
 /**
  * Send a UDP packet, with control over the source and destination. We have to use a RAW socket for specifying the
@@ -102,9 +69,6 @@ std::string stringFormat(const std::string& fmt_str, ...) {
  */
 bool sendUdp(int sock, struct in_addr from_addr, uint16_t from_port, struct in_addr to_addr, uint16_t to_port, unsigned char *pktBuf, ssize_t pktLen)
 {
-    struct sockaddr_in sin, sout;
-    // int sock;
-
     // Build the IP header
     uint8_t packet_buffer[16000];
     struct iphdr *iph;
@@ -120,7 +84,7 @@ bool sendUdp(int sock, struct in_addr from_addr, uint16_t from_port, struct in_a
     iph->ttl = 2;
     iph->protocol = IPPROTO_UDP;
     iph->check = 0;
-    iph->saddr = 0;   // Filled in automatically by OS
+    iph->saddr = from_addr.s_addr;
     iph->daddr = to_addr.s_addr;
 
     udph->source = htons(from_port);
@@ -137,17 +101,13 @@ bool sendUdp(int sock, struct in_addr from_addr, uint16_t from_port, struct in_a
 
     if(sendto(sock, packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen, 0, (struct sockaddr *)&to_zero_port, sizeof(to_zero_port)) < 0)
     {
-        /* Leaving this here in case the above ever needs to be debugged again.
-        perror("Unable to send UDP packet");
-        printf("Parameters were %d, %p, %d, %d, %d, %d\nPacket dump:", sock, packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen, 0, (struct sockaddr *)&to_addr, sizeof(to_addr));
-        hexDump(std::clog, packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen, true, currentTime() + ": UDP Packet: ");
-         */
+        LOG(LS_UDP, LL_IMPORTANT, "Unable to send UDP packet. Parameters were %d, %p, %d, %d, %d, %d", sock, packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen, 0, (struct sockaddr *)&to_addr, sizeof(to_addr));
+        LOGHEXDUMP(LS_UDP, LL_IMPORTANT, "UDP packet buffer", packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen);
         return false;
     }
 
     return true;
 }
-
 
 const std::string base60 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 /**
@@ -188,23 +148,6 @@ std::string timepointDelta(std::chrono::steady_clock::time_point t1, std::chrono
     ret += tbuf + "s"s;
 
     return ret;
-}
-
-/**
- * Current time as a string.
- *
- * @return The time, in current locale's format.
- */
-std::string currentTime()
-{
-    struct tm localtm;
-    auto timepoint = std::chrono::system_clock::now();
-    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(timepoint.time_since_epoch()).count() % 1000;
-    std::time_t cur_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    localtime_r(&cur_time, &localtm);
-    std::stringstream ss;
-    ss << std::put_time(&localtm, "%F %T") << "."s << std::setw(3) << std::setfill('0') << millis;
-    return ss.str();
 }
 
 /**
@@ -278,4 +221,41 @@ void ParseThreadConfiguration(int threadcount, std::string& affinity, ThreadConf
         throw std::length_error("The number of threads specified ("s + std::to_string(dest->cfg.size()) + ") exceeds the maximum allowed ("s + std::to_string(MAX_THREADS) + "). Recompile code and increase MAX_THREADS in utils.h if you need more."s);
 
     // We will check the ability to set affinity at set time.
+}
+
+/**
+ * Convert an eniid_t to a hex string
+ * @param eni
+ * @return
+ */
+std::string MakeENIStr(eniid_t eni)
+{
+    std::stringstream ss;
+
+    ss << std::hex << std::setw(17) << std::setfill('0') << eni << std::dec;
+    return ss.str();
+}
+
+/**
+* Case-insensitive string vector search
+*/
+
+/**
+ * Case-insensitive string vector search
+ *
+ * @param vector   Vector to search through
+ * @param search   Search string
+ * @return Index in vector of string case-insensitive, or -1 if not found.
+ */
+int VectorIndexI(std::vector<std::string> vector, std::string search)
+{
+    int ret = 0;
+    std::string searchLower = search;
+    std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(), [](unsigned char c){return std::tolower(c); });
+
+    for(auto it = vector.begin(); it != vector.end(); it++, ret++)
+        if(*it == searchLower)
+            return ret;
+
+    return -1;
 }
