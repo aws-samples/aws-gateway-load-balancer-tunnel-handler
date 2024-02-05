@@ -40,7 +40,7 @@ Threading options:
 
 AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.
 It is recommended to have the same number of UDP threads as tunnel processor threads, in one-arm operation.
-If unspecified, --udpthreads 2 and --tunthreads 2 will be assumed as a default, based on the number of cores present.
+If unspecified, --udpthreads <N> and --tunthreads <N> will be assumed as a default, based on the number of cores present.
 
 Logging options:
   --logging CONFIG         Set the logging configuration, as described below.
@@ -72,12 +72,33 @@ GenevePacket and PacketHeader handle parsing and validating GENEVE packets and I
 Logger handles processing logging messages from all threads, ensuring they get output correctly to terminal, and filtering against the logging configuration provided.
 
 ## Multithreading
-gwlbtun supports multithreading, and doing so is recommended on multicore systems. You can specify either the number or threads, or a specific affinity for CPU cores, for both the UDP receiver and the tunnel handler threads. You should test to see which set of options work best for your workload, especially if you have additional processes doing processing on the device. 
+gwlbtun supports multithreading, and doing so is recommended on multicore systems. You can specify either the number or threads, or a specific affinity for CPU cores, for both the UDP receiver and the tunnel handler threads. You should test to see which set of options work best for your workload, especially if you have additional processes doing processing on the device. By default, gwlbtun will create one UDP receive thread and one tunnel processing thread per core. 
 
 gwlbtun labels its threads with its name (gwlbtun), and either Uxxx for the UDP threads option which is simply an index, or UAxxx for the UDP affinity option, with the number being the core that thread is set for. The tunnel threads are labeled the same, except with a T instead of a U.
 
-## No return mode
-If you are only interested in the ability to receive traffic to an L3 tunnel interface, and will never send traffic back to GWLB, you can #define NO_RETURN_TRAFFIC in utils.h. This removes the gwo interfaces and all cookie flow tracking, which saves on time used to synchronize that flow tracking table. In testing, this is about a 35% improvement in PPS processing capability, at the expense of the return traffic capability. Note that this puts your appliance in a two-arm mode with GWLB, and also may be doing asymmetric traffic routing, which may have performance implications elsewhere. 
+## Advanced usages
+
+### No return mode
+If you are only interested in the ability to receive traffic to an L3 tunnel interface, and will never send traffic back to GWLB, you can #define NO_RETURN_TRAFFIC in utils.h. This removes the gwo interfaces and all cookie flow tracking, which saves on time used to synchronize that flow tracking table. Note that this puts your appliance in a two-arm mode with GWLB, and also may result in asymmetric traffic routing, which may have performance implications elsewhere. 
+
+### Handling overlapping CIDRs
+See the example-scripts/create-nat-overlapping.sh script for an example of handling overlapping CIDRs in different GWLB endpoints in two-arm mode. This script leverages conntrack and marking to accomplish this.
+
+### Supporting very high packet rates
+If your deployment is supporting high packet rates (greater than 1M pps typically), you may need to tweak some kernel settings to handle microbursts in traffic well. In testing in extremely high PPS scenarios (a fleet of iperf-based senders, all going through one c6in.32xlarge instance), you may want to consider settings akin to this (if memory allows):
+```
+sysctl -w net.core.rmem_max=50000000
+sysctl -w net.core.rmem_default=50000000
+```
+
+You can see if this problem is occurring by monitoring for UDP receive buffer errors (RcvbufErrors) with commands similar to:
+```
+# cat /proc/net/snmp | grep Udp: 
+Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+Udp: 2985556669902 428 0 666162 0 0 0 0 0
+```
+
+If RcvbufErrors is incrementing steadily, you should increase the rmem values as described above.
 
 ## Security
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
