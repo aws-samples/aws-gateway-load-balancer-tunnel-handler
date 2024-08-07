@@ -1,4 +1,9 @@
-## 2023.10.03 Release:
+## 2024.08.07 Release (v2.5):
+- Add in JSON health check output support.
+- Fix a bug that occasionally caused a crash on startup if the logger thread didn't quite initialize quick enough
+- Fix a second related bug that occasionally caused a crash on shutdown if the logger thread didn't terminate in the right order.
+
+## 2023.10.03 Release (v2.4):
 - Replace flow caches with version based on Boost's concurrent_flat_map, improving performance and reducing CPU usage due to time spent waiting for locks.
 - Standardized logging into its own class and thread, with improved configuration options
 - General code cleanup - broke out per ENI handling to its own class (GeneveHandlerENI) which simplified code a fair bit.

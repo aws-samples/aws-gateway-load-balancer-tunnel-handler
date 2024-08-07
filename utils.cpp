@@ -12,9 +12,7 @@
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <arpa/inet.h>
-#include <unistd.h>
 #include <string>
-#include <cstring>
 #include <algorithm>
 #include <iostream>
 #include "Logger.h"
@@ -135,7 +133,7 @@ std::string toBase60(uint64_t val)
  * @param t2 The later timepoint
  * @return Human-readable (hours, minutes, seconds, etc) duration between the two time_points.
  */
-std::string timepointDelta(std::chrono::steady_clock::time_point t1, std::chrono::steady_clock::time_point t2)
+std::string timepointDeltaString(std::chrono::steady_clock::time_point t1, std::chrono::steady_clock::time_point t2)
 {
     char tbuf[32];
     long delta = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t2).count();
@@ -148,6 +146,11 @@ std::string timepointDelta(std::chrono::steady_clock::time_point t1, std::chrono
     ret += tbuf + "s"s;
 
     return ret;
+}
+
+double timepointDeltaDouble(std::chrono::steady_clock::time_point t1, std::chrono::steady_clock::time_point t2)
+{
+    return (double)(std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t2).count()) / 1000.0;
 }
 
 /**
@@ -236,26 +239,3 @@ std::string MakeENIStr(eniid_t eni)
     return ss.str();
 }
 
-/**
-* Case-insensitive string vector search
-*/
-
-/**
- * Case-insensitive string vector search
- *
- * @param vector   Vector to search through
- * @param search   Search string
- * @return Index in vector of string case-insensitive, or -1 if not found.
- */
-int VectorIndexI(std::vector<std::string> vector, std::string search)
-{
-    int ret = 0;
-    std::string searchLower = search;
-    std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(), [](unsigned char c){return std::tolower(c); });
-
-    for(auto it = vector.begin(); it != vector.end(); it++, ret++)
-        if(*it == searchLower)
-            return ret;
-
-    return -1;
-}

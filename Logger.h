@@ -63,18 +63,16 @@ public:
     void LogHexDump(LogSection ls, LogLevel ll, const void *buf, std::size_t bufLen);
 
 private:
+    bool shouldTerminate;
     std::thread thread;
 
     LoggingConfiguration optionsParse(std::string loggingOptions);
     void threadFunc();
-    bool shouldTerminate;
 
     // Logging queue
     std::mutex queue_mutex;
     std::condition_variable queue_condvar;
     std::queue<struct LoggingMessage> queue;
 };
-
-
 
 #endif //GWLBTUN_LOGGER_H

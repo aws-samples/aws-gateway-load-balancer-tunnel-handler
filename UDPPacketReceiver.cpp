@@ -109,19 +109,15 @@ bool UDPPacketReceiver::healthCheck()
  *
  * @return A string containing thread status and packet counters.
  */
-std::string UDPPacketReceiver::status() {
-    std::string ret;
-
-    ret += "UDP receiver threads for port number "s + std::to_string(portNumber) + ":\n";
+UDPPacketReceiverHealthCheck UDPPacketReceiver::status() {
+    std::list<UDPPacketReceiverThreadHealthCheck> thcs;
 
     for(auto &t : threads)
     {
-        ret += t.status();
+        thcs.push_back(t.status());
     }
 
-    ret += "\n";
-
-    return ret;
+    return {portNumber, thcs};
 }
 
 /**
@@ -292,25 +288,81 @@ bool UDPPacketReceiverThread::healthCheck()
     return false;
 }
 
-std::string UDPPacketReceiverThread::status()
+UDPPacketReceiverThreadHealthCheck UDPPacketReceiverThread::status()
+{
+    if(thread.valid())
+        return {true, healthCheck(), threadNumber, threadId, pktsIn, bytesIn, lastPacket};
+    else
+        return {false, false, 0, 0, 0, 0, std::chrono::steady_clock::now()};
+}
+
+void UDPPacketReceiverThread::shutdown()
+{
+    shutdownRequested = true;
+    // The std::async threads will see that boolean change within 1 second, then exit.
+}
+
+
+UDPPacketReceiverThreadHealthCheck::UDPPacketReceiverThreadHealthCheck(bool threadValid, bool healthy, int threadNumber, int threadId, uint64_t pktsIn, uint64_t bytesIn, std::chrono::steady_clock::time_point lastPacket) :
+        threadValid(threadValid), healthy(healthy), threadNumber(threadNumber), threadId(threadId), pktsIn(pktsIn), bytesIn(bytesIn), lastPacket(lastPacket)
+{
+}
+
+std::string UDPPacketReceiverThreadHealthCheck::output_str()
 {
     std::string ret;
-    if(thread.valid())
-    {
-        ret += "UDP receiver thread "s + std::to_string(threadNumber) + " (ID "s + std::to_string(threadId) + ")"s;
-        if(healthCheck())
-            ret += ": Healthy, "s;
-        else {
-            ret += ": NOT healthy, "s;
-        }
-        ret += std::to_string(pktsIn) + " packets in, "s + std::to_string(bytesIn) + " bytes in, "s;
-        ret += timepointDelta(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n"s;
+
+    if(!threadValid)
+        return "";
+
+    ret += "UDP receiver thread "s + std::to_string(threadNumber) + " (ID "s + std::to_string(threadId) + ")"s;
+    if(healthy)
+        ret += ": Healthy, "s;
+    else {
+        ret += ": NOT healthy, "s;
     }
+    ret += std::to_string(pktsIn) + " packets in, "s + std::to_string(bytesIn) + " bytes in, "s;
+    ret += timepointDeltaString(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n"s;
 
     return ret;
 }
 
-void UDPPacketReceiverThread::shutdown() {
-    shutdownRequested = true;
-    // The std::async threads will see that boolean change within 1 second, then exit.
+json UDPPacketReceiverThreadHealthCheck::output_json()
+{
+    return  { {"valid", threadValid}, {"healthy", healthy}, {"threadNumber", threadNumber}, {"threadId", threadId},
+             {"pktsIn", pktsIn}, {"bytesIn", bytesIn}, {"secsSinceLastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacket)} };
+}
+
+UDPPacketReceiverHealthCheck::UDPPacketReceiverHealthCheck(uint16_t portNumber, std::list<UDPPacketReceiverThreadHealthCheck> threadHealthChecks) :
+        portNumber(portNumber), threadHealthChecks(std::move(threadHealthChecks))
+{
+}
+
+std::string UDPPacketReceiverHealthCheck::output_str()
+{
+    std::string ret;
+
+    ret += "UDP receiver threads for port number "s + std::to_string(portNumber) + ":\n";
+    for(auto &t : threadHealthChecks)
+        ret += t.output_str();
+
+    ret += "\n";
+
+    return ret;
+}
+
+json UDPPacketReceiverHealthCheck::output_json()
+{
+    json ret;
+
+    ret["UDPPacketReceiver"] = { {"portNumber", portNumber}, {"threads", json::array()} };
+
+    for(auto &t : threadHealthChecks)
+    {
+        auto js = t.output_json();
+        if (js["valid"] == true)
+            ret["UDPPacketReceiver"]["threads"].push_back(js);
+    }
+
+    return ret;
 }

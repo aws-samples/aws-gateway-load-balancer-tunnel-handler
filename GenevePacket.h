@@ -6,7 +6,7 @@
 
 #include <inttypes.h>
 #include <vector>
-#include <linux/if_ether.h>
+#include <netinet/if_ether.h>
 #include <netinet/ip.h>
 #include <iostream>
 

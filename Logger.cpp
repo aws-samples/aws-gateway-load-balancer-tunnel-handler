@@ -5,20 +5,21 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include <array>
 #include <cstring>
 
 using namespace std::string_literals;
 
-const std::vector<std::string> loggingSections = {
+static const std::array<std::string, 6> loggingSections = {
         "core"s, "udp"s, "geneve"s, "tunnel"s, "healthcheck"s, "all"s
 };
 
-const std::vector<std::string> loggingLevels = {
+static const std::array<std::string, 5> loggingLevels = {
         "critical"s, "important"s, "info"s, "debug"s, "debugdetail"s
 };
 
 Logger::Logger(std::string loggingOptions) :
-    cfg(optionsParse(loggingOptions)), thread(&Logger::threadFunc, this), shouldTerminate(false)
+    cfg(optionsParse(loggingOptions)), shouldTerminate(false), thread(&Logger::threadFunc, this)
 {
 
 }
@@ -39,7 +40,7 @@ std::string Logger::help()
     ss << "The logging levels available for each are: ";
     for(auto& it : loggingLevels) ss << it << " ";
     ss << std::endl;
-    ss << "The default level for all secions is 'important'.";
+    ss << "The default level for all sections is 'important'.";
     ss << std::endl;
 
     return ss.str();
@@ -65,12 +66,12 @@ LoggingConfiguration Logger::optionsParse(std::string loggingOptions)
             std::string key = token.substr(0, pos);
             std::string value = token.substr(pos + 1);
 
-            int valN = VectorIndexI(loggingLevels, value);
+            int valN = FindIndexOf(loggingLevels, value);
             if(valN == -1)
             {
                 fprintf(stderr, "Unrecognized logging level '%s' caused %s to be ignored.", value.c_str(), token.c_str());
             } else {
-                int keyN = VectorIndexI(loggingSections, key);
+                int keyN = FindIndexOf(loggingSections, key);
                 if(keyN == -1)
                 {
                    fprintf(stderr, "Unrecognized logging section '%s' caused %s to be ignored.", key.c_str(), token.c_str());

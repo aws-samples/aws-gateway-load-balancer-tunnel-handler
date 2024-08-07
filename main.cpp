@@ -63,14 +63,27 @@ void deleteInterfaceCallback(std::string ingressInt, const std::string egressInt
  * @param details true to return packet counters, false to just return the status code.
  * @param gh The GeneveHandler to return the status for.
  * @param s The socket to send the health check to
+ * @param json Whether to output as human text (false) or json (true)
  */
-void performHealthCheck(bool details, GeneveHandler *gh, int s)
+void performHealthCheck(bool details, GeneveHandler *gh, int s, bool json)
 {
-    std::string status = gh->check();
+    GeneveHandlerHealthCheck ghhc = gh->check();
+
     std::string response = "HTTP/1.1 "s + (gh->healthy ? "200 OK"s: "503 Failed"s) + "\n"s +
-            "Cache-Control: max-age=0, no-cache\n\n<!DOCTYPE html>\n<html lang=\"en-us\">\n<head><title>Health check</title></head><body>"s;
-    if(details) response += status;
-    response += "\n</body></html>";
+            "Cache-Control: max-age=0, no-cache\n";
+
+    if(json)
+        response += "Content-Type: application/json\n\n";
+    else
+        response += "Content-Type: text/html\n\n<!DOCTYPE html>\n<html lang=\"en-us\">\n<head><title>Health check</title></head><body>"s;
+
+    if(details)
+    {
+        if (json)
+            response += ghhc.output_json().dump();
+        else
+            response += ghhc.output_str() + "\n</body></html>";
+    }
 
     send(s, response.c_str(), response.length(), 0);
 }
@@ -104,6 +117,7 @@ void printHelp(char *progname)
             "  -t TIME    Minimum time in seconds between last packet seen and to consider the tunnel timed out. Set to 0 (the default) to never time out tunnels.\n"
             "             Note the actual time between last packet and the destroy call may be longer than this time.\n"
             "  -p PORT    Listen to TCP port PORT and provide a health status report on it.\n"
+            "  -j         For health check detailed statistics, output as JSON instead of text.\n"
             "  -s         Only return simple health check status (only the HTTP response code), instead of detailed statistics.\n"
             "  -d         Enable debugging output. Short version of --logging all=debug.\n"
             "\n"
@@ -159,7 +173,7 @@ int main(int argc, char *argv[])
     int tunnelTimeout = 0;
     int udpthreads = numCores(), tunthreads = numCores();
     std::string udpaffinity, tunaffinity, logoptions;
-    bool detailedHealth = true, printHelpFlag = false;
+    bool detailedHealth = true, printHelpFlag = false, jsonHealth = false;
 
     static struct option long_options[] = {
             {"cmdnew", required_argument, NULL, 'c'},
@@ -174,12 +188,13 @@ int main(int argc, char *argv[])
             {"tunthreads", required_argument, NULL, 0},    // optind 9
             {"tunaffinity", required_argument, NULL, 0},   // optind 10
             {"logging", required_argument, NULL, 0},       // optind 11
+            {"json", no_argument, NULL, 'j'},              // optind 12
             {0, 0, 0, 0}
     };
 
     // Argument parsing
     int optind;
-    while ((c = getopt_long (argc, argv, "h?dxc:r:t:p:s", long_options, &optind)) != -1)
+    while ((c = getopt_long (argc, argv, "h?djxc:r:t:p:s", long_options, &optind)) != -1)
     {
         switch(c)
         {
@@ -221,6 +236,9 @@ int main(int argc, char *argv[])
             case 'd':
                 logoptions = "all=debug";
                 break;
+            case 'j':
+                jsonHealth = true;
+                break;
             case '?':
             case 'h':
             default:
@@ -229,13 +247,13 @@ int main(int argc, char *argv[])
         }
     }
 
-    logger = new Logger(logoptions);
-
     if(printHelpFlag)
     {
         printHelp(argv[0]);
         exit(EXIT_FAILURE);
     }
+
+    logger = new Logger(logoptions);
 
     // Set up for health check reporting, if requested. We listen on both IPv4 and IPv6 for completeness, although
     // GWLB only supports IPv4.
@@ -291,7 +309,7 @@ int main(int argc, char *argv[])
             socklen_t fromlen = sizeof(from);
             hsClient = accept(healthSocket, (struct sockaddr *)&from, &fromlen);
             LOG(LS_HEALTHCHECK, LL_DEBUG, "Processing a health check client for " + sockaddrToName((struct sockaddr *)&from));
-            performHealthCheck(detailedHealth, gh, hsClient);
+            performHealthCheck(detailedHealth, gh, hsClient, jsonHealth);
             close(hsClient);
             ticksSinceCheck = 60;
         }
@@ -299,7 +317,8 @@ int main(int argc, char *argv[])
         ticksSinceCheck --;
         if(ticksSinceCheck < 0)
         {
-            LOG(LS_HEALTHCHECK, LL_DEBUG, gh->check());
+            GeneveHandlerHealthCheck ghhc = gh->check();
+            LOG(LS_HEALTHCHECK, LL_DEBUG, ghhc.output_str());
             ticksSinceCheck = 60;
         }
     }

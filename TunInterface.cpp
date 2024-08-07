@@ -127,25 +127,15 @@ void TunInterface::writePacket(unsigned char *pkt, ssize_t pktlen)
 /**
  * Human-readable status check of the module.
  *
- * @return A string containing thread status and packet counters.
+ * @return A HealthCheck class
  */
-std::string TunInterface::status()
+TunInterfaceHealthCheck TunInterface::status()
 {
-    std::string ret;
-
-    ret += "Interface "s + devname + ":\n"s;
-
-    ret += std::to_string(pktsOut) + " packets out to OS, "s + std::to_string(bytesOut) + " bytes out to OS, "s;
-    ret += timepointDelta(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n";
-
+    std::list<TunInterfaceThreadHealthCheck> thcs;
     for(auto &t : threads)
-    {
-        ret += t.status();
-    }
+        thcs.push_back(t.status());
 
-    ret += "\n"s;
-
-    return ret;
+    return { devname, pktsOut, bytesOut, lastPacket, thcs };
 }
 
 /**
@@ -288,22 +278,12 @@ bool TunInterfaceThread::healthCheck()
     return false;
 }
 
-std::string TunInterfaceThread::status()
+TunInterfaceThreadHealthCheck TunInterfaceThread::status()
 {
-    std::string ret;
     if(thread.valid())
-    {
-        ret = "Tunnel handler thread "s + std::to_string(threadNumber) + " (ID "s + std::to_string(threadId) + ")"s;
-
-        if(healthCheck())
-            ret += ": Healthy, "s;
-        else {
-            ret += ": NOT healthy, "s;
-        }
-        ret += std::to_string(pktsIn) + " packets in from OS, "s + std::to_string(bytesIn) + " bytes in from OS, "s;
-        ret += timepointDelta(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n";
-    }
-    return ret;
+      return {true, healthCheck(), threadNumber, threadId, pktsIn, bytesIn, lastPacket };
+    else
+      return { false, false, 0, 0, 0, 0, std::chrono::steady_clock::now() };
 }
 
 void TunInterfaceThread::shutdown()
@@ -346,4 +326,74 @@ int TunInterface::allocateHandle()
     }
 
     return fd;
+}
+
+TunInterfaceThreadHealthCheck::TunInterfaceThreadHealthCheck(bool threadValid, bool healthy, int threadNumber,
+                                                             int threadId, uint64_t pktsIn, uint64_t bytesIn,
+                                                             std::chrono::steady_clock::time_point lastPacket) :
+        threadValid(threadValid), healthy(healthy), threadNumber(threadNumber), threadId(threadId), pktsIn(pktsIn), bytesIn(bytesIn), lastPacket(lastPacket) {
+}
+
+std::string TunInterfaceThreadHealthCheck::output_str()
+{
+    std::string ret;
+    if(threadValid)
+    {
+        ret = "Tunnel handler thread "s + std::to_string(threadNumber) + " (ID "s + std::to_string(threadId) + ")"s;
+
+        if(healthy)
+            ret += ": Healthy, "s;
+        else {
+            ret += ": NOT healthy, "s;
+        }
+        ret += std::to_string(pktsIn) + " packets in from OS, "s + std::to_string(bytesIn) + " bytes in from OS, "s;
+        ret += timepointDeltaString(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n";
+    }
+    return ret;
+}
+
+json TunInterfaceThreadHealthCheck::output_json()
+{
+    return { {"valid", threadValid}, {"threadNumber", threadNumber}, {"threadId", threadId},
+             {"healthy", healthy}, {"pktsIn", pktsIn}, {"bytesIn", bytesIn}, {"secsSincelastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacket)} };
+}
+
+TunInterfaceHealthCheck::TunInterfaceHealthCheck(std::string devname, uint64_t pktsOut, uint64_t bytesOut, std::chrono::steady_clock::time_point lastPacket, std::list<TunInterfaceThreadHealthCheck> thcs) :
+        devname(devname), pktsOut(pktsOut), bytesOut(bytesOut), lastPacket(lastPacket), thcs(std::move(thcs))
+{}
+
+std::string TunInterfaceHealthCheck::output_str()
+{
+    std::string ret;
+
+    ret += "Interface "s + devname + ":\n"s;
+
+    ret += std::to_string(pktsOut) + " packets out to OS, "s + std::to_string(bytesOut) + " bytes out to OS, "s;
+    ret += timepointDeltaString(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n";
+
+    for(auto &t : thcs)
+    {
+        ret += t.output_str();
+    }
+
+    ret += "\n"s;
+
+    return ret;
+}
+
+json TunInterfaceHealthCheck::output_json()
+{
+    json ret;
+
+    ret = { {"devname", devname}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"secsSincelastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacket)} ,
+            {"threads", json::array()} };
+
+    for(auto &t : thcs)
+    {
+        auto js = t.output_json();
+        if(js["valid"] == true)
+          ret["threads"].push_back(js);
+    }
+
+    return ret;
 }

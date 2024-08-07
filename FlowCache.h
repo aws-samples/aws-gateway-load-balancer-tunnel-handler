@@ -15,9 +15,22 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <utility>
 #include <stdexcept>
+#include "HealthCheck.h"
 
 // Timeout for the flow cache in seconds. This is set a little longer than GWLB's timeout.
 #define FLOWCACHE_TIMEOUT 360
+
+class FlowCacheHealthCheck : public HealthCheck {
+public:
+    FlowCacheHealthCheck(std::string, long unsigned int, long unsigned int);
+    std::string output_str() ;
+    json output_json();
+
+private:
+    std::string cacheName;
+    long unsigned int size;
+    long unsigned int timedOut;
+};
 
 /**
  * Cache entry format
@@ -49,7 +62,7 @@ public:
     FlowCache(std::string cacheName, int cacheTimeout);
     V lookup(K key);
     V emplace_or_lookup(K key, V value);
-    std::string check();
+    FlowCacheHealthCheck check();
 private:
     const int cacheTimeout;
     const std::string cacheName;
@@ -101,17 +114,14 @@ template<class K, class V>V FlowCache<K, V>::emplace_or_lookup(K key, V value)
  *
  * @return String of diagnostic text.
  */
-template<class K, class V> std::string FlowCache<K, V>::check()
+template<class K, class V> FlowCacheHealthCheck FlowCache<K, V>::check()
 {
-    std::stringstream ss;
+    long unsigned int timedOut;
     time_t expireTime = time(NULL) - cacheTimeout;
 
-    ss << cacheName << " : Contains " << cache.size() << " elements, of which " <<
-       cache.erase_if([expireTime](auto& fce) { return fce.second.last < expireTime; }) << " were just timed out." << std::endl;
+    timedOut = cache.erase_if([expireTime](auto& fce) { return fce.second.last < expireTime; });
 
-    return ss.str();
+    return { cacheName, cache.size(), timedOut };
 }
-
-
 
 #endif //GWLBTUN_FLOWCACHE_H

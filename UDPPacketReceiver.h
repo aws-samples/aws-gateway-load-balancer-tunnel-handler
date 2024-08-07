@@ -7,9 +7,25 @@
 #include <future>
 #include <functional>
 #include <unistd.h>
+#include <list>
 #include "utils.h"
+#include "HealthCheck.h"
 
 typedef std::function<void(unsigned char *pktBuf, ssize_t pktBufLen, struct in_addr *srcIp, uint16_t srcPort, struct in_addr *dstIp, uint16_t dstPort)> udpCallback;
+
+
+class UDPPacketReceiverThreadHealthCheck : public HealthCheck {
+public:
+    UDPPacketReceiverThreadHealthCheck(bool threadValid, bool healthy, int threadNumber, int threadId, uint64_t pktsIn, uint64_t bytesIn, std::chrono::steady_clock::time_point lastPacket);
+    std::string output_str();
+    json output_json();
+
+private:
+    bool threadValid, healthy;
+    int threadNumber, threadId;
+    uint64_t pktsIn, bytesIn;
+    std::chrono::steady_clock::time_point lastPacket;
+};
 
 class UDPPacketReceiverThread {
 public:
@@ -18,7 +34,7 @@ public:
 
     void setup(int threadNumberParam, int coreNumberParam, uint16_t portNumberParam, udpCallback recvDispatcherParam);
     bool healthCheck();
-    std::string status();
+    UDPPacketReceiverThreadHealthCheck status();
     void shutdown();
     bool setupCalled;
 
@@ -36,6 +52,17 @@ private:
     std::atomic<uint64_t> pktsIn, bytesIn;
 };
 
+class UDPPacketReceiverHealthCheck : public HealthCheck {
+public:
+    UDPPacketReceiverHealthCheck(uint16_t portNumber, std::list<UDPPacketReceiverThreadHealthCheck> threadHealthChecks);
+    std::string output_str() ;
+    json output_json();
+
+private:
+    uint16_t portNumber;
+    std::list<UDPPacketReceiverThreadHealthCheck> threadHealthChecks;
+};
+
 class UDPPacketReceiver {
 public:
     UDPPacketReceiver();
@@ -43,12 +70,13 @@ public:
 
     void setup(ThreadConfig threadConfig, uint16_t portNumberParam, udpCallback recvDispatcherParam);
     bool healthCheck();
-    std::string status();
+    UDPPacketReceiverHealthCheck status();
     void shutdown();
 
 private:
     uint16_t portNumber;
     std::array<class UDPPacketReceiverThread, MAX_THREADS> threads;
 };
+
 
 #endif //GWAPPLIANCE_UDPPACKETRECEIVER_H

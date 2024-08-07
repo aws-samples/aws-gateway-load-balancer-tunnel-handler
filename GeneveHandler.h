@@ -18,6 +18,7 @@
 #include "utils.h"
 #include <net/if.h>     // Needed for IFNAMSIZ define
 #include <boost/unordered/concurrent_flat_map.hpp>
+#include "HealthCheck.h"
 
 typedef std::function<void(std::string inInt, std::string outInt, eniid_t eniId)> ghCallback;
 
@@ -39,13 +40,34 @@ public:
 /**
  * For each ENI (GWLBe) that is detected, a copy of GeneveHandlerENI is created.
  */
+
+class GeneveHandlerENIHealthCheck : public HealthCheck {
+public:
+#ifndef NO_RETURN_TRAFFIC
+    GeneveHandlerENIHealthCheck(std::string, TunInterfaceHealthCheck, TunInterfaceHealthCheck, FlowCacheHealthCheck, FlowCacheHealthCheck);
+#else
+    GeneveHandlerENIHealthCheck(std::string, TunInterfaceHealthCheck);
+#endif
+    std::string output_str() ;
+    json output_json();
+
+private:
+    std::string eniStr;
+    TunInterfaceHealthCheck tunnelIn;
+#ifndef NO_RETURN_TRAFFIC
+    TunInterfaceHealthCheck tunnelOut;
+    FlowCacheHealthCheck v4FlowCache;
+    FlowCacheHealthCheck v6FlowCache;
+#endif
+};
+
 class GeneveHandlerENI {
 public:
     GeneveHandlerENI(eniid_t eni, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
     ~GeneveHandlerENI();
     void udpReceiverCallback(const GwlbData &gd, unsigned char *pkt, ssize_t pktlen);
     void tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen);
-    std::string check();
+    GeneveHandlerENIHealthCheck check();
     bool hasGoneIdle(int timeout);
 
 private:
@@ -78,11 +100,23 @@ private:
     std::unique_ptr<GeneveHandlerENI> ptr;
  };
 
+class GeneveHandlerHealthCheck : public HealthCheck {
+public:
+    GeneveHandlerHealthCheck(bool, UDPPacketReceiverHealthCheck, std::list<GeneveHandlerENIHealthCheck>);
+    std::string output_str() ;
+    json output_json();
+
+private:
+    bool healthy;
+    UDPPacketReceiverHealthCheck udp;
+    std::list<GeneveHandlerENIHealthCheck> enis;
+};
+
 class GeneveHandler {
 public:
     GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads);
     void udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort);
-    std::string check();
+    GeneveHandlerHealthCheck check();
     bool healthy;                  // Updated by check()
 
 private:
@@ -94,6 +128,9 @@ private:
     UDPPacketReceiver udpRcvr;
 
 };
+
+
+
 
 std::string devname_make(eniid_t eni, bool inbound);
 

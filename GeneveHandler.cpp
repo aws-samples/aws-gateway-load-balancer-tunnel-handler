@@ -66,21 +66,48 @@ GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallba
  *
  * @return A human-readable string of the health status.
  */
-std::string GeneveHandler::check()
+GeneveHandlerHealthCheck::GeneveHandlerHealthCheck(bool healthy, UDPPacketReceiverHealthCheck udp, std::list<GeneveHandlerENIHealthCheck> enis) :
+    healthy(healthy), udp(std::move(udp)), enis(std::move(enis))
+{
+}
+
+std::string GeneveHandlerHealthCheck::output_str()
+{
+    std::string ret;
+    ret += udp.output_str();
+
+    for(auto &eni : enis)
+        ret += eni.output_str();
+
+    return ret;
+}
+
+json GeneveHandlerHealthCheck::output_json()
+{
+    json ret;
+
+    ret = { {"udp", udp.output_json()}, {"enis", json::array()} };
+
+    for(auto &eni : enis)
+        ret["enis"].push_back(eni.output_json());
+
+    return ret;
+}
+
+GeneveHandlerHealthCheck GeneveHandler::check()
 {
     LOG(LS_HEALTHCHECK, LL_DEBUG, "Health check starting");
-    std::string ret;
-    healthy = udpRcvr.healthCheck();
-    ret += udpRcvr.status();
+
+    std::list<GeneveHandlerENIHealthCheck> enis;
 
     // Clean up any ENI handlers that have apparently gone idle, if we're not keeping them around forever.
     if(eniDestroyTimeout > 0)
         eniHandlers.erase_if([&](auto& eniHandler) { return (*eniHandler.second.ptr).hasGoneIdle(eniDestroyTimeout); });
 
     // Check remaining handlers.
-    eniHandlers.visit_all([&ret](auto& eniHandler) { ret = ret + (*eniHandler.second.ptr).check() ; });
+    eniHandlers.visit_all([&enis](auto& eniHandler) { enis.push_back( (*eniHandler.second.ptr).check() );  ; });
 
-    return ret;
+    return { udpRcvr.healthCheck(), udpRcvr.status(), enis };
 }
 
 /**
@@ -293,23 +320,51 @@ void GeneveHandlerENI::udpReceiverCallback(const GwlbData &gd, unsigned char *pk
  * Perform a health check on this ENI, and return some information.
  * @return
  */
-std::string GeneveHandlerENI::check()
+#ifndef NO_RETURN_TRAFFIC
+GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(std::string eniStr, TunInterfaceHealthCheck tunnelIn, TunInterfaceHealthCheck tunnelOut, FlowCacheHealthCheck v4FlowCache, FlowCacheHealthCheck v6FlowCache) :
+        eniStr(eniStr), tunnelIn(std::move(tunnelIn)), tunnelOut(std::move(tunnelOut)), v4FlowCache(std::move(v4FlowCache)), v6FlowCache(std::move(v6FlowCache))
+{
+}
+#else
+GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(std::string eniStr, TunInterfaceHealthCheck tunnelIn) :
+    eniStr(eniStr), tunnelIn(std::move(tunnelIn))
+{
+}
+#endif
+
+std::string GeneveHandlerENIHealthCheck::output_str()
 {
     std::stringstream ret;
 
     ret << "Handler for ENI " << eniStr << std::endl;
 
-    // Check our tunnel handlers.
-    ret << tunnelIn->status();
+    ret << tunnelIn.output_str();
 #ifndef NO_RETURN_TRAFFIC
-    ret << tunnelOut->status();
-
-    // Check cookie caches, and purge stale entries.
-    ret << gwlbV4Cookies.check();
-    ret << gwlbV6Cookies.check();
+    ret << tunnelOut.output_str();
+    ret << v4FlowCache.output_str();
+    ret << v6FlowCache.output_str();
 #endif
 
     return ret.str();
+}
+
+json GeneveHandlerENIHealthCheck::output_json()
+{
+#ifndef NO_RETURN_TRAFFIC
+    return {{"eniStr", eniStr}, {"tunnelIn", tunnelIn.output_json()}, {"tunnelOut", tunnelOut.output_json()}, {"v4FlowCache", v4FlowCache.output_json()}, {"v6FlowCache", v6FlowCache.output_json()}};
+#else
+    return {{"eniStr", eniStr}, {"tunnelIn", tunnelIn.output_json()}};
+#endif
+    // TODO.
+}
+
+GeneveHandlerENIHealthCheck GeneveHandlerENI::check()
+{
+#ifndef NO_RETURN_TRAFFIC
+    return { eniStr, tunnelIn->status(), tunnelOut->status(), gwlbV4Cookies.check(), gwlbV6Cookies.check()};
+#else
+    return { eniStr, tunnelIn->status() };
+#endif
 }
 
 /**
@@ -336,10 +391,12 @@ GeneveHandlerENIPtr::GeneveHandlerENIPtr(eniid_t eni, ThreadConfig &tunThreadCon
     ptr = std::make_unique<GeneveHandlerENI>(eni, tunThreadConfig, createCallback, destroyCallback);
 }
 
+
 std::string devname_make(eniid_t eni, bool inbound) {
     if(inbound)
         return "gwi-"s + toBase60(eni);
     else
         return "gwo-"s + toBase60(eni);
 }
+
 

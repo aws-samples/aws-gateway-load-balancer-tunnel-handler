@@ -28,9 +28,9 @@ Example: ./gwlbtun
   -t TIME    Minimum time in seconds between last packet seen and to consider the tunnel timed out. Set to 0 (the default) to never time out tunnels.
              Note the actual time between last packet and the destroy call may be longer than this time.
   -p PORT    Listen to TCP port PORT and provide a health status report on it.
+  -j         For health check detailed statistics, output as JSON instead of text.  
   -s         Only return simple health check status (only the HTTP response code), instead of detailed statistics.
   -d         Enable debugging output. Short version of --logging all=debug.
-  -x         Enable dumping the hex payload of packets being processed.
 
 Threading options:
   --udpthreads NUM         Generate NUM threads for the UDP receiver.
@@ -100,8 +100,22 @@ Udp: 2985556669902 428 0 666162 0 0 0 0 0
 
 If RcvbufErrors is incrementing steadily, you should increase the rmem values as described above.
 
+### Health Check output
+If you do not provide the -s flag, the health check port produces human-readable statistics about the traffic gwlbtun is processing. If you add in the -j flag, this output is formatted as JSON for consumption by outside monitoring processes.
+
 ## Security
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
 
 ## License
-This library is licensed under the MIT-0 License. See the LICENSE file.
+This tool is licensed under the MIT-0 License. See the LICENSE file.
+
+### json.hpp
+The class is licensed under the MIT License:
+
+Copyright © 2013-2022 Niels Lohmann
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
