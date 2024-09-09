@@ -260,42 +260,168 @@ Resources:
         - Key: Name
           Value: !Join [ "-", [ !Ref AWS::StackName, "Application" ] ]
 
-  # For the two-arm traffic return, create a Transit Gateway, attachments to both VPCs, and set routing.
-  TGW:
-    Type: AWS::EC2::TransitGateway
+  # Do the fixes to our endpoint to allow IPv6 to work, until IPv6 support is added to CF.
+  LambdaGWLBeIPv6FixRole:
+    Type: AWS::IAM::Role
     Properties:
-      AmazonSideAsn: 64512
-      DefaultRouteTableAssociation: enable
-      DefaultRouteTablePropagation: enable
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName} TGW
-      Description: !Sub ${AWS::StackName} TGW
-  TGWtoGWLBTun:
-    Type: AWS::EC2::TransitGatewayAttachment
+      RoleName: !Sub "${AWS::StackName}-LambdaGWLBeIPv6Fix"
+      Description: Role for Cloudformation lambda script GWLBeIPv6Fix
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: [ lambda.amazonaws.com ] }
+            Action: [ 'sts:AssumeRole' ]
+      Policies:
+        - PolicyName: AllowModifyVPCEndpoint
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - ec2:ModifyVpcEndpoint
+                Resource: !Sub "arn:aws:ec2:*:${AWS::AccountId}:vpc-endpoint/*"
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # Pass in the endpoint ID as GWLBeId. The version of botocore in lambda is too old to recognize the IpAddressType
+  # parameter, thus the install of a newer version at the start.
+  LambdaGWLBeIPv6Fix:
+    Type: AWS::Lambda::Function
     Properties:
-      SubnetIds:
-        - !Ref GWLBTunPublicSubnet
-      TransitGatewayId: !Ref TGW
-      VpcId: !Ref GWLBTunVPC
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-GWLBTun"
-  TGWtoApplication:
-    Type: AWS::EC2::TransitGatewayAttachment
-    Properties:
-      SubnetIds:
-        - !Ref ApplicationPrivateSubnet
-      TransitGatewayId: !Ref TGW
-      VpcId: !Ref ApplicationVPC
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-Application"
-  TGWRouteGWLBTunToApplication:
-    Type: AWS::EC2::Route
-    Properties:
-      DestinationCidrBlock: 10.20.0.0/16
-      RouteTableId: !Ref GWLBTunPublicRT
-      TransitGatewayId: !Ref TGW
+      FunctionName: !Sub "${AWS::StackName}-GWLBeIPv6Fix"
+      Handler: index.handler
+      Role: !GetAtt LambdaGWLBeIPv6FixRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import sys
+          from pip._internal import main
+
+          main(['install', '-I', '-q', 'boto3', '--target', '/tmp/', '--no-cache-dir', '--disable-pip-version-check'])
+          sys.path.insert(0,'/tmp/')
+
+          import boto3
+          import cfnresponse
+          import threading
+          import logging
+          import botocore
+          import time
+
+          def timeout(event, context):
+            logging.error('Execution is about to time out, sending failure response to CloudFormation')
+            cfnresponse.send(event, context, cfnresponse.FAILED, {}, None, reason="Execution timeout")
+
+          def handler(event, context):
+            timer = threading.Timer((context.get_remaining_time_in_millis() / 1000.00) - 0.5, timeout, args=[event, context])
+            timer.start()
+            try:
+              if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                ec2 = boto3.client('ec2')
+                res = ec2.modify_vpc_endpoint(VpcEndpointId=event['ResourceProperties']['GWLBeId'], IpAddressType='dualstack')
+                if 'Return' in res and res['Return'] == True:
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, res, event['ResourceProperties']['GWLBeId'])
+                else:
+                  logging.error(f"modify_vpc_endpoint returned something other than True: {res}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, res)
+              else:
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+            except Exception as e:
+                logging.error('Exception: %s' % e, exc_info=True)
+                logging.error(f"Data from request:\nevent={event}\ncontext={context}")
+                cfnresponse.send(event, context, cfnresponse.FAILED, {"e": f'{e}'})
+                raise e
+      Runtime: python3.9
+
+  GWLBeIPv6:
+    Type: Custom::GWLBIPV6
     DependsOn:
-      - TGWtoGWLBTun
+      - GWLBESIPv6
+    Properties:
+      ServiceToken: !GetAtt LambdaGWLBeIPv6Fix.Arn
+      GWLBeId: !Ref GWLBe
+
+  LambdaGWLBESIPv6FixRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-LambdaGWLBESIPv6Fix"
+      Description: Role for Cloudformation lambda script GWLBESIPv6Fix
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: [ lambda.amazonaws.com ] }
+            Action: [ 'sts:AssumeRole' ]
+      Policies:
+        - PolicyName: AllowModifyVPCEndpoint
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - ec2:ModifyVpcEndpointServiceConfiguration
+                Resource: !Sub "arn:aws:ec2:*:${AWS::AccountId}:vpc-endpoint-service/*"
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  LambdaGWLBESIPv6Fix:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-GWLBESIPv6Fix"
+      Handler: index.handler
+      Role: !GetAtt LambdaGWLBESIPv6FixRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import sys
+          from pip._internal import main
+
+          main(['install', '-I', '-q', 'boto3', '--target', '/tmp/', '--no-cache-dir', '--disable-pip-version-check'])
+          sys.path.insert(0,'/tmp/')
+
+          import boto3
+          import cfnresponse
+          import threading
+          import logging
+          import botocore
+          import time
+
+          def timeout(event, context):
+            logging.error('Execution is about to time out, sending failure response to CloudFormation')
+            cfnresponse.send(event, context, cfnresponse.FAILED, {}, None, reason="Execution timeout")
+
+          def handler(event, context):
+            timer = threading.Timer((context.get_remaining_time_in_millis() / 1000.00) - 0.5, timeout, args=[event, context])
+            timer.start()
+            try:
+              if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                ec2 = boto3.client('ec2')
+                res = ec2.modify_vpc_endpoint_service_configuration(ServiceId=event['ResourceProperties']['GWLBES'], AddSupportedIpAddressTypes=['ipv6'])
+                if 'Return' in res and res['Return'] == True:
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, res, event['ResourceProperties']['GWLBES'])
+                else:
+                  logging.error(f"modify_vpc_endpoint returned something other than True: {res}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, res)
+              else:
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+            except Exception as e:
+                logging.error('Exception: %s' % e, exc_info=True)
+                logging.error(f"Data from request:\nevent={event}\ncontext={context}")
+                cfnresponse.send(event, context, cfnresponse.FAILED, {"e": f'{e}'})
+                raise e
+      Runtime: python3.9
+
+  GWLBESIPv6:
+    Type: Custom::GWLBIPV6
+    Properties:
+      ServiceToken: !GetAtt LambdaGWLBESIPv6Fix.Arn
+      GWLBES: !Ref GWLBEndpointService
+
+Outputs:
+  GWLBES:
+    Description: ID of the GWLB endpoint service
+    Value: !Sub "com.amazonaws.vpce.${AWS::Region}.${GWLBEndpointService}"
+    Export:
+      Name: !Sub "${AWS::StackName}-EndpointService"
