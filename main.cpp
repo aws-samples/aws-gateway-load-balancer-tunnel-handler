@@ -116,6 +116,9 @@ void printHelp(char *progname)
             "  -r FILE    Command to execute when a tunnel times out and is about to be destroyed. See below for arguments passed.\n"
             "  -t TIME    Minimum time in seconds between last packet seen and to consider the tunnel timed out. Set to 0 (the default) to never time out tunnels.\n"
             "             Note the actual time between last packet and the destroy call may be longer than this time.\n"
+#ifndef NO_RETURN_TRAFFIC
+            "  -i TIME    Idle timeout to use for the flow caches. Set this to match what GWLB is configured for. Defaults to 350 seconds.\n"
+#endif
             "  -p PORT    Listen to TCP port PORT and provide a health status report on it.\n"
             "  -j         For health check detailed statistics, output as JSON instead of text.\n"
             "  -s         Only return simple health check status (only the HTTP response code), instead of detailed statistics.\n"
@@ -170,7 +173,7 @@ int main(int argc, char *argv[])
 {
     int c;
     int healthCheck = 0, healthSocket;
-    int tunnelTimeout = 0;
+    int tunnelTimeout = 0, cacheTimeout = 350;
     int udpthreads = numCores(), tunthreads = numCores();
     std::string udpaffinity, tunaffinity, logoptions;
     bool detailedHealth = true, printHelpFlag = false, jsonHealth = false;
@@ -189,6 +192,7 @@ int main(int argc, char *argv[])
             {"tunaffinity", required_argument, NULL, 0},   // optind 10
             {"logging", required_argument, NULL, 0},       // optind 11
             {"json", no_argument, NULL, 'j'},              // optind 12
+            {"idle", required_argument, NULL, 'i'},        // optind 13
             {0, 0, 0, 0}
     };
 
@@ -239,6 +243,9 @@ int main(int argc, char *argv[])
             case 'j':
                 jsonHealth = true;
                 break;
+            case 'i':
+                cacheTimeout = atoi(optarg);
+                break;
             case '?':
             case 'h':
             default:
@@ -285,7 +292,7 @@ int main(int argc, char *argv[])
     ParseThreadConfiguration(udpthreads, udpaffinity, &udp);
     ParseThreadConfiguration(tunthreads, tunaffinity, &tun);
 
-    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, udp, tun);
+    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, cacheTimeout, udp, tun);
     struct timespec timeout;
     timeout.tv_sec = 1; timeout.tv_nsec = 0;
     fd_set fds;

@@ -17,17 +17,15 @@
 #include <stdexcept>
 #include "HealthCheck.h"
 
-// Timeout for the flow cache in seconds. This is set a little longer than GWLB's timeout.
-#define FLOWCACHE_TIMEOUT 360
-
 class FlowCacheHealthCheck : public HealthCheck {
 public:
-    FlowCacheHealthCheck(std::string, long unsigned int, long unsigned int);
+    FlowCacheHealthCheck(std::string, int, long unsigned int, long unsigned int);
     std::string output_str() ;
     json output_json();
 
 private:
     std::string cacheName;
+    int cacheTimeout;
     long unsigned int size;
     long unsigned int timedOut;
 };
@@ -121,7 +119,7 @@ template<class K, class V> FlowCacheHealthCheck FlowCache<K, V>::check()
 
     timedOut = cache.erase_if([expireTime](auto& fce) { return fce.second.last < expireTime; });
 
-    return { cacheName, cache.size(), timedOut };
+    return { cacheName, cacheTimeout, cache.size(), timedOut };
 }
 
 #endif //GWLBTUN_FLOWCACHE_H

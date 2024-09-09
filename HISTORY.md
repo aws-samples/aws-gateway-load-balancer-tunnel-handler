@@ -1,3 +1,6 @@
+## 2024.09.01 Release (v3.0):
+- Support GWLB variable timeouts for the flow cache.
+
 ## 2024.08.07 Release (v2.5):
 - Add in JSON health check output support.
 - Fix a bug that occasionally caused a crash on startup if the logger thread didn't quite initialize quick enough

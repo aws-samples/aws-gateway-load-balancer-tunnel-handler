@@ -63,7 +63,7 @@ private:
 
 class GeneveHandlerENI {
 public:
-    GeneveHandlerENI(eniid_t eni, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
+    GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
     ~GeneveHandlerENI();
     void udpReceiverCallback(const GwlbData &gd, unsigned char *pkt, ssize_t pktlen);
     void tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen);
@@ -73,6 +73,7 @@ public:
 private:
     const eniid_t eni;
     const std::string eniStr;
+    int cacheTimeout;
 
     const std::string devInName;
     const std::string devOutName;
@@ -96,7 +97,7 @@ private:
  */
  class GeneveHandlerENIPtr {
  public:
-    GeneveHandlerENIPtr(eniid_t eni, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
+    GeneveHandlerENIPtr(eniid_t eni, int idleTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
     std::unique_ptr<GeneveHandlerENI> ptr;
  };
 
@@ -114,7 +115,7 @@ private:
 
 class GeneveHandler {
 public:
-    GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads);
+    GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads);
     void udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort);
     GeneveHandlerHealthCheck check();
     bool healthy;                  // Updated by check()
@@ -124,6 +125,7 @@ private:
     ghCallback createCallback;
     ghCallback destroyCallback;
     int eniDestroyTimeout;
+    int cacheTimeout;
     ThreadConfig tunThreadConfig;
     UDPPacketReceiver udpRcvr;
 

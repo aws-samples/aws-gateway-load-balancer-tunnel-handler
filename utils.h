@@ -18,8 +18,8 @@
 
 using namespace std::string_literals;
 
-#define VERSION_MAJOR 2
-#define VERSION_MINOR 5
+#define VERSION_MAJOR 3
+#define VERSION_MINOR 0
 
 // If only decapsulation is required, i.e. you will never send traffic back to GWLB via the local interfaces,
 // you can define the following symbol to improve performance (GWLBTun no longer needs to track flow cookies, etc.)

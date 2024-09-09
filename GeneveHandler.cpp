@@ -22,7 +22,6 @@
 using namespace std::string_literals;
 
 #define GWLB_MTU           8500         // MTU of customer payload packets that can be processed
-#define GWLB_CACHE_EXPIRE  350          // After many seconds of a flow being idle do we consider it inactive
 #define GENEVE_PORT        6081         // UDP port number that GENEVE uses by standard
 
 /**
@@ -52,9 +51,9 @@ GwlbData::GwlbData(GenevePacket &gp, struct in_addr *srcAddr, uint16_t srcPort, 
  * @param destroyCallback Function to call when an endpoint has gone away and we need to clean up.
  * @param destroyTimeout How long to wait for an endpoint to be idle before calling destroyCallback.
  */
-GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads)
+GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads)
         : healthy(true),
-          createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)), eniDestroyTimeout(destroyTimeout),
+          createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)), eniDestroyTimeout(destroyTimeout), cacheTimeout(cacheTimeout),
           tunThreadConfig(std::move(tunThreads))
 {
     // Set up UDP receiver threads.
@@ -146,7 +145,7 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
         }
 
         // Figure out which GeneveHandlerENI this needs to dispatch to, creating if necessary
-        if(eniHandlers.try_emplace_or_cvisit(gp.gwlbeEniId, gp.gwlbeEniId, tunThreadConfig, createCallback, destroyCallback, [&](const auto& eniHandler)
+        if(eniHandlers.try_emplace_or_cvisit(gp.gwlbeEniId, gp.gwlbeEniId, cacheTimeout, tunThreadConfig, createCallback, destroyCallback, [&](const auto& eniHandler)
             {
                 (*eniHandler.second.ptr).udpReceiverCallback(gd, pkt, pktlen);
             }))
@@ -168,16 +167,16 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
  * GeneveHandlerENI handles all aspects of handling for a given ENI. It is separated out this way to make dealing with
  * keeping all the resources needed on a per ENI basis easier.
  */
-GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback) :
-    eni(eni), eniStr(MakeENIStr(eni)),
-    devInName(devname_make(eni, true)),
+GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback) :
+        eni(eni), eniStr(MakeENIStr(eni)), cacheTimeout(cacheTimeout),
+        devInName(devname_make(eni, true)),
 #ifndef NO_RETURN_TRAFFIC
-    devOutName(devname_make(eni, false)),
-    gwlbV4Cookies("IPv4 Flow Cache for ENI " + eniStr, GWLB_CACHE_EXPIRE), gwlbV6Cookies("IPv6 Flow Cache for ENI " + eniStr, GWLB_CACHE_EXPIRE),
+        devOutName(devname_make(eni, false)),
+        gwlbV4Cookies("IPv4 Flow Cache for ENI " + eniStr, cacheTimeout), gwlbV6Cookies("IPv6 Flow Cache for ENI " + eniStr, cacheTimeout),
 #else
     devOutName("none"s),
 #endif
-    createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback))
+        createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback))
 {
     // Set up a socket we use for sending traffic out for ENI.
     tunnelIn = std::make_unique<TunInterface>(devInName, GWLB_MTU, tunThreadConfig, std::bind(&GeneveHandlerENI::tunReceiverCallback, this, std::placeholders::_1, std::placeholders::_2));
@@ -386,9 +385,9 @@ bool GeneveHandlerENI::hasGoneIdle(int timeout)
 /**
  * GeneveHandlerENI unique_ptr wrapper class
  */
-GeneveHandlerENIPtr::GeneveHandlerENIPtr(eniid_t eni, ThreadConfig &tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback)
+GeneveHandlerENIPtr::GeneveHandlerENIPtr(eniid_t eni, int cacheTimeout, ThreadConfig &tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback)
 {
-    ptr = std::make_unique<GeneveHandlerENI>(eni, tunThreadConfig, createCallback, destroyCallback);
+    ptr = std::make_unique<GeneveHandlerENI>(eni, cacheTimeout, tunThreadConfig, createCallback, destroyCallback);
 }
 
 
