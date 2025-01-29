@@ -76,6 +76,18 @@ gwlbtun supports multithreading, and doing so is recommended on multicore system
 
 gwlbtun labels its threads with its name (gwlbtun), and either Uxxx for the UDP threads option which is simply an index, or UAxxx for the UDP affinity option, with the number being the core that thread is set for. The tunnel threads are labeled the same, except with a T instead of a U.
 
+## Kernel sysctls
+Because most usages of gwlbtun have it sitting in the middle of a communications path (bump in the wire), none of the traffic is directly destined for it. Thus, in most cases, you should disable the reverse path filter (rp_filter) on associated GWI interfaces, in order for the kernel to allow the traffic through. The hook scripts are a good place to do this (the input interface is passed as $2) and the examples in example-scripts show different ways. One option:
+```
+sysctl net.ipv4.conf.$2.rp_filter=0
+```
+
+Additionally, if you're doing NAT or other forwarding operations, you need to enable IP forwarding for IPv4 and IPv6 as appropriate:
+```
+sysctl net.ipv4.ip_forward=1
+sysctl net.ipv6.conf.all.forwarding=1
+```
+
 ## Advanced usages
 
 ### No return mode
