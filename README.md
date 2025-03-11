@@ -64,6 +64,140 @@ The logging levels available for each are: critical important info debug debugde
 The default level for all secions is 'important'.
 ```
 
+## Configuration Files
+
+### Dockerfile
+The Dockerfile builds a container image for the GWLB tunnel handler:
+
+```dockerfile
+FROM amazonlinux:2023.6.20250203.1
+
+RUN yum update; yum install -y iproute-tc iptables tcpdump iputils procps
+
+COPY example-scripts/* .
+COPY gwlbtun .
+
+ENTRYPOINT ["./gwlbtun"] 
+CMD ["-c", "./create-route.sh", "-p", "8060"]
+````
+#### Key Components:
+
+  - Build Stage :
+    - Uses golang:1.20-alpine as builder image
+    - Compiles the application with CGO disabled
+    - Builds for Linux platform
+  - Final Stage :
+    - Based on Alpine 3.18
+    - Installs required packages (iproute2, bash, iptables)
+    - Copies binary and scripts from builder
+    - Sets up entrypoint and default command
+
+### DaemonSet Configuration (gwlbtun-ds.yaml)
+The DaemonSet ensures that the tunnel handler runs on each node in the Kubernetes cluster.
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gwlbtun-node
+spec:
+  selector:
+    matchLabels:
+      app: gwlbtun-node
+  template:
+    metadata:
+      labels:
+        app: gwlbtun-node
+        component: network
+    spec:
+      containers:
+      - image: "[docker image]"
+        imagePullPolicy: IfNotPresent
+        name: gwlbtun
+        command:
+        - ./gwlbtun
+        - -c
+        - ./create-route.sh
+        - -p
+        - "8060"
+        resources:
+          requests:
+            cpu: 10m
+            memory: 300Mi
+        securityContext:
+          privileged: true
+          capabilities:
+            add: ["NET_ADMIN"]
+      hostNetwork: true
+      hostPID: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      restartPolicy: Always
+```
+#### Key Components:
+  - DaemonSet Name : gwlbtun-node
+  - Container Configuration :
+    -  Port: 8060
+    - Resource requests: 10m CPU, 300Mi memory
+    - Runs with privileged access and NET_ADMIN capabilities
+    - Uses host network and PID namespace
+  - Node Selection : Runs only on Linux nodes
+  - Restart Policy : Always restarts on failure
+
+## Deployment
+### Prerequisites
+- Kubernetes cluster with Linux nodes
+- kubectl configured with cluster access
+- Docker registry access
+
+### Deployment Steps
+1. Build and push the Docker image:
+
+```bash
+# Build the Docker image
+docker build -t your-registry/gwlbtun:tag .
+
+# Push to your registry
+docker push your-registry/gwlbtun:tag
+```
+2. Update the image reference in gwlbtun-ds.yaml:
+
+```yaml
+image: "your-registry/gwlbtun:tag"
+```
+
+3. Apply the DaemonSet:
+
+```bash
+kubectl apply -f gwlbtun-ds.yaml
+```
+
+Verification
+Check if the DaemonSet pods are running:
+
+```bash
+kubectl get pods -l app=gwlbtun-node
+```
+
+Monitoring
+Monitor the tunnel handler logs:
+
+```bash
+kubectl logs -l app=gwlbtun-node
+```
+Configuration Parameters
+- -c: Path to the route creation script
+
+- -p: Port number for the tunnel handler (default: 8060)
+
+Security Considerations
+The DaemonSet runs with privileged access
+
+NET_ADMIN capability is required for network operations
+
+Consider implementing network policies for additional security
+
+
 ## Source code layout
 main.cpp contains the start of the code, but primarily interfaces with GeneveHandler, defined in GeneveHandler.cpp. 
 That class launches the multithreaded UDP receiver, and then creates GeneveHandlerENI class instances per GWLB ENI detected.
