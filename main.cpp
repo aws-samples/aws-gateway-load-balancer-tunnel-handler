@@ -198,7 +198,7 @@ int main(int argc, char *argv[])
 
     // Argument parsing
     int optind;
-    while ((c = getopt_long (argc, argv, "h?djxc:r:t:p:s", long_options, &optind)) != -1)
+    while ((c = getopt_long (argc, argv, "h?djxc:r:t:p:si:", long_options, &optind)) != -1)
     {
         switch(c)
         {
