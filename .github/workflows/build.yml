@@ -16,8 +16,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake git libssl-dev
 
-        - name: Install Boost 1.83.0
-          run: |
+      - name: Install Boost 1.83.0
+        run: |
             wget https://sourceforge.net/projects/boost/files/boost/1.83.0/boost_1_83_0.tar.bz2
             tar xzf boost_1_83_0.tar.gz
             cd boost_1_83_0
