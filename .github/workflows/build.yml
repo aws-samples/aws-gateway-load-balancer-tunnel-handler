@@ -1,0 +1,31 @@
+name: build gwlbtun
+
+on:
+  push:
+    branches:
+      - main
+  
+jobs:
+  build-gwlbtun:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git libssl-dev
+
+      - name: Clone the GWLB tunnel handler repo
+        run: |
+          git clone https://github.com/aws-samples/aws-gateway-load-balancer-tunnel-handler
+
+      - name: Build gwlbtun
+        run: |
+          cd aws-gateway-load-balancer-tunnel-handler
+          cmake .
+          make
+
+      - name: Check for built binary
+        run: |
+          ls -l aws-gateway-load-balancer-tunnel-handler/gwlbtun
