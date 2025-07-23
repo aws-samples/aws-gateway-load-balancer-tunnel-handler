@@ -24,16 +24,11 @@ jobs:
           ./bootstrap.sh
           sudo ./b2 install
 
-      - name: Clone the GWLB tunnel handler repo
-        run: |
-          git clone https://github.com/aws-samples/aws-gateway-load-balancer-tunnel-handler
-
       - name: Build gwlbtun
         run: |
-          cd aws-gateway-load-balancer-tunnel-handler
           cmake .
           make
 
       - name: Check for built binary
         run: |
-          ls -l aws-gateway-load-balancer-tunnel-handler/gwlbtun
+          ls -l gwlbtun
