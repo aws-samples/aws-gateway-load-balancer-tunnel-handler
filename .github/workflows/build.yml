@@ -47,7 +47,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create ${{ github.sha }} aws-gateway-load-balancer-tunnel-handler/gwlbtun \
+          gh release create ${{ github.sha }} gwlbtun \
             --repo ${{ github.repository }} \
             --title "GWLB Tunnel Handler build ${{ github.sha }}" \
             --notes "Automated build from main @ ${{ github.sha }}"
