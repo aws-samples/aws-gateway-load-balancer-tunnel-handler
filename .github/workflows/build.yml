@@ -10,7 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
+      - name: Cache Boost
+        uses: actions/cache@v4
+        with:
+          path: ~/boost
+          key: boost-1.83-${{ runner.os }}
+          
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -36,3 +41,13 @@ jobs:
       - name: Check for built binary
         run: |
           ls -l gwlbtun
+          test -f gwlbtun
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ github.sha }} aws-gateway-load-balancer-tunnel-handler/gwlbtun \
+            --repo ${{ github.repository }} \
+            --title "GWLB Tunnel Handler build ${{ github.sha }}" \
+            --notes "Automated build from main @ ${{ github.sha }}"
