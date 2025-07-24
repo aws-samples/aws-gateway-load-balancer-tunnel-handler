@@ -22,11 +22,15 @@ jobs:
             tar xjf boost_1_83_0.tar.bz2
             cd boost_1_83_0
             ./bootstrap.sh
-            ./b2 link=static runtime-link=static install
+            ./b2 link=static runtime-link=static --prefix=$HOME/boost install
 
       - name: Build gwlbtun
         run: |
-          cmake -DBoost_USE_STATIC_LIBS=ON -DBUILD_SHARED_LIBS=OFF .
+          cmake \
+           -DBOOST_ROOT=$HOME/boost \
+           -DBOOST_INCLUDEDIR=$HOME/boost/include \
+           -DBOOST_LIBRARYDIR=$HOME/boost/lib \
+           -DBoost_USE_STATIC_LIBS=ON -DBUILD_SHARED_LIBS=OFF .
           make
 
       - name: Check for built binary
