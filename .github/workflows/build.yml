@@ -19,7 +19,7 @@ jobs:
       - name: Install Boost 1.83.0
         run: |
             wget https://sourceforge.net/projects/boost/files/boost/1.83.0/boost_1_83_0.tar.bz2
-            tar xzf boost_1_83_0.tar.gz
+            tar xjf boost_1_83_0.tar.bz2
             cd boost_1_83_0
             ./bootstrap.sh
             ./b2 link=static runtime-link=static install
