@@ -38,7 +38,6 @@ public:
     FlowCacheEntry(V entrydata);
 
     time_t last;
-    uint32_t useCount;
     V data;
 };
 
@@ -46,7 +45,7 @@ public:
  * Cache entry functions
  */
 template<class V> FlowCacheEntry<V>::FlowCacheEntry(V entrydata) :
-        last(time(NULL)), useCount(1), data(entrydata)
+        last(time(NULL)), data(std::move(entrydata))
 {
 }
 
@@ -59,7 +58,7 @@ template <class K, class V> class FlowCache {
 public:
     FlowCache(std::string cacheName, int cacheTimeout);
     V lookup(K key);
-    V emplace_or_lookup(K key, V value);
+    void insert(K key, V value);
     FlowCacheHealthCheck check();
 private:
     const int cacheTimeout;
@@ -86,25 +85,22 @@ FlowCache<K, V>::FlowCache(std::string cacheName, int cacheTimeout) :
 template<class K, class V>V FlowCache<K, V>::lookup(K key)
 {
     V ret;
-    if(cache.visit(key, [&](auto& fce) { fce.second.last = time(NULL); fce.second.useCount ++; ret = fce.second.data; }))
+    if(cache.visit(key, [&](auto& fce) { fce.second.last = time(NULL); ret = fce.second.data; }))
         return ret;
     else
         throw std::invalid_argument("Key not found in FlowCache.");
 }
 
 /**
- * Looks up a value for key K in our cache. If not present, insert with value V.
+ * Insert a value for key K in our cache. If not present, insert with value V otherwise update the value.
  *
  * @param K Key to lookup
  * @param V Value to insert if K is not present.
- * @return Value (either the one looked up, or the inserted data, as appropriate).
  */
-template<class K, class V>V FlowCache<K, V>::emplace_or_lookup(K key, V value)
+template<class K, class V>void FlowCache<K, V>::insert(K key, V value)
 {
-    V ret;
-    if(!(cache.emplace_or_visit(key, value, [&](auto& fce) { fce.second.last = time(NULL); fce.second.useCount ++; ret = fce.second.data; })))
-        return ret;
-    return value;
+    // Insert new or assign existing in a single step; moves value exactly once
+    cache.insert_or_assign(std::move(key), FlowCacheEntry<V>(std::move(value)));
 }
 
 /**
