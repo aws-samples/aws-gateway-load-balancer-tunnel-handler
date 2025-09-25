@@ -2,55 +2,62 @@ name: build gwlbtun
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
+
 permissions:
   contents: write
 
 jobs:
   build-gwlbtun:
     runs-on: ubuntu-latest
+    # Build inside AL2023 so glibc matches the AMI
+    container:
+      image: public.ecr.aws/amazonlinux/amazonlinux:2023
     steps:
-      - uses: actions/checkout@v3
-      - name: Cache Boost
-        uses: actions/cache@v4
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies (AL2023)
+        run: |
+          dnf -y update
+          dnf -y groupinstall "Development Tools"
+          dnf -y install cmake gcc-c++ git openssl-devel boost-devel
+
+      - name: Configure & build
+        run: |
+          cmake -DCMAKE_BUILD_TYPE=Release .
+          make -j"$(nproc)"
+          strip gwlbtun || true
+          file gwlbtun
+          ldd gwlbtun
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
         with:
-          path: ~/boost
-          key: boost-1.83-${{ runner.os }}
-          
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake git libssl-dev
+          name: gwlbtun-al2023
+          path: gwlbtun
 
-      - name: Install Boost 1.83.0
-        run: |
-            wget https://sourceforge.net/projects/boost/files/boost/1.83.0/boost_1_83_0.tar.bz2
-            tar xjf boost_1_83_0.tar.bz2
-            cd boost_1_83_0
-            ./bootstrap.sh
-            ./b2 link=static runtime-link=static --prefix=$HOME/boost install
+      - name: Set tag
+        id: tag
+        run: echo "TAG=ci-$(date +%Y%m%d%H%M%S)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - name: Build gwlbtun
-        run: |
-          cmake \
-           -DBOOST_ROOT=$HOME/boost \
-           -DBOOST_INCLUDEDIR=$HOME/boost/include \
-           -DBOOST_LIBRARYDIR=$HOME/boost/lib \
-           -DBoost_USE_STATIC_LIBS=ON -DBUILD_SHARED_LIBS=OFF .
-          make
-
-      - name: Check for built binary
-        run: |
-          ls -l gwlbtun
-          test -f gwlbtun
-
-      - name: Create Release
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.TAG }}
+          release_name: GWLB Tunnel Handler build ${{ steps.tag.outputs.TAG }}
+          body: Automated build from main @ ${{ steps.tag.outputs.TAG }}
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="ci-$(date +%Y%m%d%H%M%S)-${GITHUB_SHA::7}"
-          gh release create "$TAG" gwlbtun \
-           --repo ${{ github.repository }} \
-           --title "GWLB Tunnel Handler build $TAG" \
-           --notes "Automated build from main @ $TAG"
+
+      - name: Upload binary to Release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./gwlbtun
+          asset_name: gwlbtun
+          asset_content_type: application/octet-stream
