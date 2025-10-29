@@ -9,32 +9,25 @@
 #include <netinet/if_ether.h>
 #include <netinet/ip.h>
 #include <iostream>
+#include <boost/container/small_vector.hpp>
 
 typedef uint64_t eniid_t;
 
-// Storage for options seen in a Geneve header.
-struct GeneveOption {
-    uint16_t optClass;           // Option class, converted to host format
-    uint8_t optType;             // Type, converted to host format
-    unsigned char r : 3;         // R bits
-    uint8_t optLen;              // Option length, in bytes (converted from on-wire 4-byte multiples value)
-    unsigned char *optData;      // Pointer to the option data.  May be nullptr, if optLen is 0.
-};
+// Take the assumption options will remain below 32 bytes, otherwise this should be increased
+typedef boost::container::small_vector<unsigned char, 40> GeneveHeader;
 
 class GenevePacket {
 public:
     GenevePacket();
     GenevePacket(unsigned char *pktBuf, ssize_t pktLen);   // pktBuf points to the start of the Geneve header (i.e. after the outer UDP header)
-
-    int status;
-    int headerLen;               // Total length of the Geneve header parsed.
-    std::vector<struct GeneveOption> geneveOptions;   // Parsed options from the Geneve header.
-    uint32_t geneveVni;          // The outer VNI identifier from the Geneve header.
-    bool gwlbeEniIdValid, attachmentIdValid, flowCookieValid;   // False if the options weren't found (and the below values MUST NOT be used), or true if they were.
+    
     eniid_t gwlbeEniId;         // The GWLBE ENI ID option, if it was found (check via the valid boolean)
     uint64_t attachmentId;       // The attachment ID option, if it was found
+    int status;
     uint32_t flowCookie;         // The flow cookie, if it was found
-    std::vector<unsigned char>header;   // Copy of the Geneve header to put back on packets
+    uint32_t geneveVni;          // The outer VNI identifier from the Geneve header.
+    uint32_t headerLen;          // Length of the Geneve header
+    bool gwlbeEniIdValid, attachmentIdValid, flowCookieValid;   // False if the options weren't found (and the below values MUST NOT be used), or true if they were.
 
     std::string text();
     friend auto operator<<(std::ostream& os, GenevePacket const& m) -> std::ostream&;

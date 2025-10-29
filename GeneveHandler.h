@@ -26,16 +26,19 @@ typedef std::function<void(std::string inInt, std::string outInt, eniid_t eniId)
 class GwlbData {
 public:
     GwlbData();
-    GwlbData(GenevePacket &gp, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort);
+    GwlbData(GeneveHeader header, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort);
 
     // Elements are arranged so that when doing sorting/searching, we get entropy early. This gives a slight
     // improvement to the lookup time.
-    GenevePacket gp;
     struct in_addr srcAddr;
-    uint16_t srcPort;
     struct in_addr dstAddr;
+    uint16_t srcPort;
     uint16_t dstPort;
+    GeneveHeader header;   // Copy of the Geneve header to put back on packets
+
+    std::string text();
 };
+
 
 /**
  * For each ENI (GWLBe) that is detected, a copy of GeneveHandlerENI is created.
@@ -65,7 +68,7 @@ class GeneveHandlerENI {
 public:
     GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
     ~GeneveHandlerENI();
-    void udpReceiverCallback(const GwlbData &gd, unsigned char *pkt, ssize_t pktlen);
+    void udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssize_t pktlen);
     void tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen);
     GeneveHandlerENIHealthCheck check();
     bool hasGoneIdle(int timeout);
@@ -91,14 +94,15 @@ private:
     const ghCallback destroyCallback;
 };
 
-/**
- * Simple class wrapper for GeneveHandlerENI that leverages unique_ptr to keep things intact. Class is needed
- * to prevent unnecessary early construction/destruction in the concurrent_flat_map try_emplace calls.
- */
+ /**
+  * Simple class wrapper for GeneveHandlerENI that leverages shared_ptr to keep things intact. Class is needed
+  * to prevent unnecessary early construction/destruction in the concurrent_flat_map try_emplace calls and to
+  * allow safe thread-local weak caching without extending lifetime unnecessarily.
+  */
  class GeneveHandlerENIPtr {
  public:
     GeneveHandlerENIPtr(eniid_t eni, int idleTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
-    std::unique_ptr<GeneveHandlerENI> ptr;
+    std::shared_ptr<GeneveHandlerENI> ptr;
  };
 
 class GeneveHandlerHealthCheck : public HealthCheck {
@@ -128,6 +132,9 @@ private:
     int cacheTimeout;
     ThreadConfig tunThreadConfig;
     UDPPacketReceiver udpRcvr;
+
+    // Thread-local fast-path cache: per-thread weak references to ENI handlers, keyed by this instance
+    static thread_local std::unordered_map<const GeneveHandler*, std::unordered_map<eniid_t, std::weak_ptr<GeneveHandlerENI>>> tlsEniCache;
 
 };
 

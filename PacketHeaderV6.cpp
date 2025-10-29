@@ -70,34 +70,6 @@ PacketHeaderV6::PacketHeaderV6(unsigned char *pktbuf, ssize_t pktlen)
 }
 
 /**
- * Compare if the headers in one packet match another. Meant to be used for the various sort and search functions.
- *
- * @param ph PacketHeaderV4 to compare againgst.
- * @return true if PacketHeaders are the same, false otherwise.
- */
-bool PacketHeaderV6::operator==(const PacketHeaderV6 &ph) const
-{
-#ifdef HASH_IS_SYMMETRICAL
-    return prot == ph.prot &&
-           ((srcpt == ph.srcpt && dstpt == ph.dstpt && !memcmp(&src, &ph.src, sizeof(struct in6_addr)) && !memcmp(&dst, &ph.dst, sizeof(struct in6_addr))) ||
-            (srcpt == ph.dstpt && dstpt == ph.srcpt && !memcmp(&src, &ph.dst, sizeof(struct in6_addr)) && !memcmp(&dst, &ph.src, sizeof(struct in6_addr))));
-#else
-    return prot == ph.prot &&  srcpt == ph.srcpt && dstpt == ph.dstpt &&
-        !memcmp(&src, &ph.src, sizeof(struct in6_addr)) && !memcmp(&dst, &ph.dst, sizeof(struct in6_addr));
-#endif
-}
-
-/**
- * Returns a hash value based on the protocol data.
- *
- * @return Hash value.
- */
-std::size_t PacketHeaderV6::hash() const
-{
-    return hashFunc(prot, (void *)&src, (void *)&dst, 16, srcpt, dstpt);
-}
-
-/**
  * Returns a string with the contents of the PacketHeaderV4 for human consumption.
  *
  * @return The string.
@@ -135,16 +107,3 @@ std::ostream &operator<<(std::ostream &os, PacketHeaderV6 const &m)
 {
     return os << m.text();
 }
-
-/**
- * Extend std::hash for PacketHeaderV6
- */
-std::size_t std::hash<PacketHeaderV6>::operator()(const PacketHeaderV6& t) const
-{
-    return t.hash();
-};
-
-std::size_t hash_value(const PacketHeaderV6& t)
-{
-    return t.hash();
-};
