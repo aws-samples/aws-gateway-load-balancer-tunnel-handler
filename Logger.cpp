@@ -102,7 +102,8 @@ void Logger::threadFunc()
     for(auto i = LS_CORE; i < LS_COUNT; i = LogSection(i+1))
         ss << loggingSections[i] << "=" << loggingLevels[cfg.ll[i]].c_str() << "  ";
 
-    LOG(LS_CORE, LL_IMPORTANT, ss.str());
+    // Use direct call instead of LOG macro here since during initialization the global it points to may not be valid yet.
+    this->Log(LS_CORE, LL_IMPORTANT, ss.str());
 
     while(!shouldTerminate)
     {
