@@ -13,7 +13,7 @@ sudo yum install cmake3
 
 In the directory with the source code, do ```cmake3 .; make``` to build. This code works with both Intel and Graviton-based architectures.
 
-**This version requires the Boost libraries, version 1.83.0 or greater.** This tends to be a newer version than available on distributions (for example, at time of writing, 1.75 is available in AL2023). You may need to go to https://www.boost.org/, download, and install a newer version than what's available in the repositories  
+**This version requires the Boost libraries, version 1.83.0 or greater.** This tends to be a newer version than available on distributions (for example, at time of writing, 1.75 is available in AL2023). You may need to go to https://www.boost.org/, download, and install a newer version than what's available in the repositories. Note that only the headers are needed - you do not need to go through Boost compilation. The cmake file looks for the source to be extracted into /home/ec2-user/boost - you can change this path by changing the `Boost_INCLUDE_DIR` value in CMakeLists.txt before running `cmake3`.  
 
 ## Usage
 For Linux, the application requires CAP_NET_ADMIN capability to create the tunnel interfaces along with the example helper scripts.
