@@ -78,41 +78,35 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
         return;
     }
 
-    // Work through the packet buffer, option-by-option, moving pktPtr as needed. We're expecting 3, so reserve that.
-    geneveOptions.reserve(3);
+    // Work through the packet buffer, option-by-option, moving pktPtr as needed.
     pktPtr = &pktBuf[8];
-    struct GeneveOption go;
     while(pktPtr < &pktBuf[8 + optLen])
     {
-        // Convert option to host format and in the struct. See RFC 8926 section 3.5.
-        bzero(&go, sizeof(go));
-        go.optClass = be16toh(*(uint16_t *)&pktPtr[0]);
-        go.optType = (uint8_t)pktPtr[2];
-        go.r = (unsigned char)(pktPtr[3] & 0xe0 >> 5);
-        go.optLen = (pktPtr[3] & 0x1f) * 4;
-        if(go.optLen > 0) go.optData = &pktPtr[4];
-        geneveOptions.push_back(go);
+        // Parse option header. See RFC 8926 section 3.5.
+        uint16_t optClass = be16toh(*(uint16_t *)&pktPtr[0]);
+        uint8_t optType = (uint8_t)pktPtr[2];
+        uint8_t optLen = (pktPtr[3] & 0x1f) * 4;
+        unsigned char *optData = (optLen > 0) ? &pktPtr[4] : nullptr;
 
         // check for AWS specific options for GWLB.
-        if(go.optClass == 0x108 && go.optType == 1 && go.optLen == 8)
+        if(optClass == 0x108 && optType == 1 && optLen == 8)
         {
             gwlbeEniIdValid = true;
-            gwlbeEniId = be64toh(*(uint64_t *)go.optData);
+            gwlbeEniId = be64toh(*(uint64_t *)optData);
         }
-        else if(go.optClass == 0x108 && go.optType == 2 && go.optLen == 8)
+        else if(optClass == 0x108 && optType == 2 && optLen == 8)
         {
             attachmentIdValid = true;
-            attachmentId = be64toh(*(uint64_t *)go.optData);
+            attachmentId = be64toh(*(uint64_t *)optData);
         }
-        else if(go.optClass == 0x108 && go.optType == 3 && go.optLen == 4)
+        else if(optClass == 0x108 && optType == 3 && optLen == 4)
         {
             flowCookieValid = true;
-            flowCookie = be32toh(*(uint32_t *)go.optData);
+            flowCookie = be32toh(*(uint32_t *)optData);
         }
-        pktPtr += 4 + go.optLen;
+        pktPtr += 4 + optLen;
     }
 
-    header = std::vector<unsigned char>(pktBuf, pktBuf + 8 + optLen);
     headerLen = 8 + optLen;
 
     // If the three mandatory options for GWLB weren't seen, this can't be a valid packet from it.
