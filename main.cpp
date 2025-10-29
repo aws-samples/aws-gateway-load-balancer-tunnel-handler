@@ -69,22 +69,22 @@ void performHealthCheck(bool details, GeneveHandler *gh, int s, bool json)
 {
     GeneveHandlerHealthCheck ghhc = gh->check();
 
-    std::string response = "HTTP/1.1 "s + (gh->healthy ? "200 OK"s: "503 Failed"s) + "\n"s +
-            "Cache-Control: max-age=0, no-cache\n";
+    std::stringstream responseStream;
 
-    if(json)
-        response += "Content-Type: application/json\n\n";
-    else
-        response += "Content-Type: text/html\n\n<!DOCTYPE html>\n<html lang=\"en-us\">\n<head><title>Health check</title></head><body>"s;
+    responseStream << "HTTP/1.1 " << (gh->healthy ? "200 OK" : "503 Service Unavailable") << "\r\n"
+                   << "Cache-Control: max-age=0, no-cache\r\n"
+                   << "Content-Type: " << (json ? "application/json" : "text/html") << "\r\n";
 
-    if(details)
-    {
-        if (json)
-            response += ghhc.output_json().dump();
-        else
-            response += ghhc.output_str() + "\n</body></html>";
+    if (details) {
+        std::string body = json ? ghhc.output_json().dump() :
+            "<!DOCTYPE html>\n<html lang=\"en-us\">\n<head><title>Health check</title></head><body>" + ghhc.output_str() + "\n</body></html>";
+
+        responseStream << "Content-Length: " << body.length() << "\r\n\r\n" << body;
+    } else {
+        responseStream << "Content-Length: 0\r\n\r\n";
     }
 
+    std::string response = responseStream.str();
     send(s, response.c_str(), response.length(), 0);
 }
 
