@@ -13,9 +13,7 @@
 #include <netinet/udp.h>
 #include <netinet/tcp.h>
 #include <cstring>
-#include <typeindex>
 
-#include "utils.h"
 
 /**
  * Parse an IP packet header.
@@ -66,32 +64,6 @@ PacketHeaderV4::PacketHeaderV4(unsigned char *pktbuf, ssize_t pktlen)
 }
 
 /**
- * Compare if the headers in one packet match another. Meant to be used for the various sort and search functions.
- *
- * @param ph PacketHeaderV4 to compare againgst.
- * @return true if PacketHeaders are the same, false otherwise.
- */
-bool PacketHeaderV4::operator==(const PacketHeaderV4 &ph) const
-{
-#ifdef HASH_IS_SYMMETRICAL
-    return prot == ph.prot && ((src == ph.src && dst == ph.dst && srcpt == ph.srcpt && dstpt == ph.dstpt) ||
-                               (src == ph.dst && dst == ph.src && srcpt == ph.dstpt && dstpt == ph.srcpt));
-#else
-    return prot == ph.prot && src == ph.src && dst == ph.dst && srcpt == ph.srcpt && dstpt == ph.dstpt;
-#endif
-}
-
-/**
- * Returns a hash value based on the protocol data.
- *
- * @return Hash value.
- */
-std::size_t PacketHeaderV4::hash() const
-{
-    return hashFunc(prot, (void *)&src, (void *)&dst, 4, srcpt, dstpt);
-}
-
-/**
  * Returns a string with the contents of the PacketHeaderV4 for human consumption.
  *
  * @return The string.
@@ -126,16 +98,3 @@ std::ostream &operator<<(std::ostream &os, PacketHeaderV4 const &m)
 {
     return os << m.text();
 }
-
-/**
- * Extend std::hash for PacketHeaderV4
- */
-std::size_t std::hash<PacketHeaderV4>::operator()(const PacketHeaderV4& t) const
-{
-    return t.hash();
-};
-
-std::size_t hash_value(const PacketHeaderV4& t)
-{
-    return t.hash();
-};
