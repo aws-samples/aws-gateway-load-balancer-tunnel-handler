@@ -293,7 +293,7 @@ void GeneveHandlerENI::udpReceiverCallback(const GwlbData &gd, unsigned char *pk
 #ifndef NO_RETURN_TRAFFIC
                 auto ph = PacketHeaderV4(pkt + gd.gp.headerLen, pktlen - gd.gp.headerLen);
                 // Ensure flow is in flow cache.
-                auto gdret = gwlbV4Cookies.emplace_or_lookup(ph, gd);
+                gwlbV4Cookies.insert(std::move(ph), std::move(gd));
 #endif
                 // Route the decap'ed packet to our tun interface.
                 (*tunnelIn).writePacket(pkt + gd.gp.headerLen, pktlen - gd.gp.headerLen);
@@ -301,7 +301,7 @@ void GeneveHandlerENI::udpReceiverCallback(const GwlbData &gd, unsigned char *pk
 #ifndef NO_RETURN_TRAFFIC
                 auto ph = PacketHeaderV6(pkt + gd.gp.headerLen, pktlen - gd.gp.headerLen);
                 // Ensure flow is in flow cache.
-                auto gdret = gwlbV6Cookies.emplace_or_lookup(ph, gd);
+                gwlbV6Cookies.insert(std::move(ph), std::move(gd));
 #endif
                 // Route the decap'ed packet to our tun interface.
                 (*tunnelIn).writePacket(pkt + gd.gp.headerLen, pktlen - gd.gp.headerLen);
