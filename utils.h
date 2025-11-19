@@ -21,6 +21,13 @@ using namespace std::string_literals;
 #define VERSION_MAJOR 3
 #define VERSION_MINOR 0
 
+// Fix for versions of GLBIC prior to 2.30 where gettid() was added.
+#if defined(__GLIBC__) && (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 30))
+#include <sys/syscall.h>
+#include <unistd.h>
+#define gettid() syscall(SYS_gettid)
+#endif
+
 // If only decapsulation is required, i.e. you will never send traffic back to GWLB via the local interfaces,
 // you can define the following symbol to improve performance (GWLBTun no longer needs to track flow cookies, etc.)
 //#define NO_RETURN_TRAFFIC
