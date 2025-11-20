@@ -107,7 +107,8 @@ int numCores()
 void printHelp(char *progname)
 {
     fprintf(stderr,
-            "AWS Gateway Load Balancer Tunnel Handler v%d.%d\n"
+            "AWS Gateway Load Balancer Tunnel Handler v%d.%d (%s)\n"
+            "Built: %s\n"
             "Usage: %s [options]\n"
             "Example: %s\n"
             "\n"
@@ -153,7 +154,7 @@ void printHelp(char *progname)
             "The <X> in the interface name is replaced with the base 60 encoded ENI ID (to fit inside the 15 character\n"
             "device name limit).\n"
             "---------------------------------------------------------------------------------------------------------\n"
-            , VERSION_MAJOR, VERSION_MINOR, progname, progname, numCores(), numCores());
+            , VERSION_MAJOR, VERSION_MINOR, GIT_DESCRIBE, BUILD_TIMESTAMP, progname, progname, numCores(), numCores());
     fprintf(stderr, logger->help().c_str());
 }
 
@@ -298,7 +299,7 @@ int main(int argc, char *argv[])
     fd_set fds;
     int ready;
     int ticksSinceCheck = 60;
-    LOG(LS_CORE, LL_IMPORTANT, "AWS Gateway Load Balancer Tunnel Handler v%d.%d started.", VERSION_MAJOR, VERSION_MINOR);
+    LOG(LS_CORE, LL_IMPORTANT, "AWS Gateway Load Balancer Tunnel Handler v%d.%d (%s) built %s", VERSION_MAJOR, VERSION_MINOR, GIT_DESCRIBE, BUILD_TIMESTAMP);
     while(keepRunning)
     {
         FD_ZERO(&fds);
