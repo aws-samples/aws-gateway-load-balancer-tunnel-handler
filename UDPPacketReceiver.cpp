@@ -142,6 +142,8 @@ UDPPacketReceiverThread::~UDPPacketReceiverThread()
             status = thread.wait_for(std::chrono::seconds(1));
         }
     }
+    if(sock >= 0)
+        close(sock);
 }
 
 void UDPPacketReceiverThread::setup(int threadNumberParam, int coreNumberParam, uint16_t portNumberParam,

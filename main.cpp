@@ -317,8 +317,13 @@ int main(int argc, char *argv[])
             socklen_t fromlen = sizeof(from);
             hsClient = accept(healthSocket, (struct sockaddr *)&from, &fromlen);
             LOG(LS_HEALTHCHECK, LL_DEBUG, "Processing a health check client for " + sockaddrToName((struct sockaddr *)&from));
-            performHealthCheck(detailedHealth, gh, hsClient, jsonHealth);
-            close(hsClient);
+            try {
+                performHealthCheck(detailedHealth, gh, hsClient, jsonHealth);
+                close(hsClient);
+            } catch(...) {
+                close(hsClient);
+                throw;
+            }
             ticksSinceCheck = 60;
         }
 

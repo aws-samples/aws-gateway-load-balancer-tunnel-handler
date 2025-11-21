@@ -212,7 +212,12 @@ GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& 
     if(sendingSock == -1)
         throw std::runtime_error("Unable to allocate a socket for sending UDP traffic.");
 #endif
-    this->createCallback(devInName, devOutName, this->eni);
+    try {
+        this->createCallback(devInName, devOutName, this->eni);
+    } catch(...) {
+        close(sendingSock);
+        throw;
+    }
 }
 
 GeneveHandlerENI::~GeneveHandlerENI()
