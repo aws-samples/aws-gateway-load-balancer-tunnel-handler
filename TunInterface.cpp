@@ -116,7 +116,13 @@ void TunInterface::writePacket(unsigned char *pkt, ssize_t pktlen)
     if(!writerHandles.visit(pthread_self(), [&](auto& targetfd) { write(targetfd.second, (void *)pkt, pktlen); }))
     {
         // Key wasn't found - create and send.
+        LOG(LS_TUNNEL, LL_DEBUG, "Allocating a new TUN write handle for thread "s + ts(pthread_self()));
         int targetfd = allocateHandle();
+        if(targetfd == -1)
+        {
+            LOG(LS_TUNNEL, LL_IMPORTANT, "Unable to allocate TUN write handle for thread "s + ts(pthread_self()) + " - dropping packet.");
+            return;
+        }
         writerHandles.emplace(pthread_self(), targetfd);
         write(targetfd, (void *)pkt, pktlen);
     }
@@ -163,7 +169,7 @@ std::chrono::steady_clock::time_point TunInterface::lastPacketTime()
  */
 
 TunInterfaceThread::TunInterfaceThread()
-: setupCalled(false),lastPacket(std::chrono::steady_clock::now()),pktsIn(0),pktsOut(0),bytesIn(0),bytesOut(0),shutdownRequested(false)
+: setupCalled(false),lastPacket(std::chrono::steady_clock::now()),pktsIn(0),pktsOut(0),bytesIn(0),bytesOut(0),shutdownRequested(false),fd(-1)
 {
 
 }
@@ -312,7 +318,7 @@ int TunInterface::allocateHandle()
     // Code adapted from Linux Documentation/networking/tuntap.txt to create the tun device.
     if((fd = open("/dev/net/tun", O_RDWR)) < 0)
     {
-        LOG(LS_TUNNEL, LL_CRITICAL, "Unable to open /dev/net/tun "s + std::error_code{errno, std::generic_category()}.message());
+        LOG(LS_TUNNEL, LL_CRITICAL, "Unable to open /dev/net/tun: "s + std::error_code{errno, std::generic_category()}.message());
         throw std::system_error(errno, std::generic_category(), "Unable to open /dev/net/tun");
     }
 
