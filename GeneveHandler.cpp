@@ -198,6 +198,7 @@ GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& 
 #ifndef NO_RETURN_TRAFFIC
         devOutName(devname_make(eni, false)),
         gwlbV4Cookies("IPv4 Flow Cache for ENI " + eniStr, cacheTimeout), gwlbV6Cookies("IPv6 Flow Cache for ENI " + eniStr, cacheTimeout),
+        sendingSock(-1),
 #else
     devOutName("none"s),
 #endif
@@ -216,6 +217,10 @@ GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& 
 
 GeneveHandlerENI::~GeneveHandlerENI()
 {
+#ifndef NO_RETURN_TRAFFIC
+    if(sendingSock != -1)
+        close(sendingSock);
+#endif
     this->destroyCallback(devInName, devOutName, this->eni);
 }
 
