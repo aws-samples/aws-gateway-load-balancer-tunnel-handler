@@ -55,19 +55,25 @@ TunInterface::TunInterface(std::string devname, int mtu, ThreadConfig threadConf
     ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
 
     int dummy = socket(PF_INET, SOCK_DGRAM, 0);
-    if(ioctl(dummy, SIOCGIFFLAGS, (void *)&ifr) < 0)
+    if(ioctl(dummy, SIOCGIFFLAGS, (void *)&ifr) < 0) {
+        close(dummy);
         throw std::system_error(errno, std::generic_category(), "Unable to get device flags");
+    }
 
     ifr.ifr_flags |= IFF_UP;        // Set interface is up
     ifr.ifr_flags |= IFF_RUNNING;   // Interface is running
     ifr.ifr_flags &= ~IFF_POINTOPOINT;
-    if(ioctl(dummy, SIOCSIFFLAGS, (void *)&ifr) < 0)
+    if(ioctl(dummy, SIOCSIFFLAGS, (void *)&ifr) < 0) {
+        close(dummy);
         throw std::system_error(errno, std::generic_category(), "Unable to set device flags");
+    }
 
     // Set the MTU to the GWLB standard (8500)
     ifr.ifr_mtu = mtu;
-    if(ioctl(dummy, SIOCSIFMTU, (void *)&ifr) < 0)
+    if(ioctl(dummy, SIOCSIFMTU, (void *)&ifr) < 0) {
+        close(dummy);
         throw std::system_error(errno, std::generic_category(), "Unable to set MTU");
+    }
     close(dummy);
 }
 
@@ -376,7 +382,7 @@ TunSocket::TunSocket() : fd(-1) {}
 
 void TunSocket::connect(const std::string devname)
 {
-    if(fd < 0)
+    if(fd >= 0)
         close(fd);
 
     if((fd = open("/dev/net/tun", O_RDWR)) < 0)
