@@ -150,7 +150,7 @@ TunInterfaceHealthCheck TunInterface::status()
  */
 std::chrono::steady_clock::time_point TunInterface::lastPacketTime()
 {
-    std::chrono::steady_clock::time_point ret;
+    std::chrono::steady_clock::time_point ret = lastPacket.load();
 
     for(auto &t : threads)
     {
