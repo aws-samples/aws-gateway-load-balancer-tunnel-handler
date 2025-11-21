@@ -16,7 +16,7 @@
 #include "PacketHeaderV6.h"
 #include "FlowCache.h"
 #include "utils.h"
-#include <net/if.h>     // Needed for IFNAMSIZ define
+#include <linux/if.h>     // Needed for IFNAMSIZ define
 #include <boost/unordered/concurrent_flat_map.hpp>
 #include "HealthCheck.h"
 
