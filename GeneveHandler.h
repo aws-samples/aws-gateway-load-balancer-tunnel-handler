@@ -68,8 +68,8 @@ class GeneveHandlerENI {
 public:
     GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
     ~GeneveHandlerENI();
-    void udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssize_t pktlen);
-    void tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen);
+    void udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssize_t pktlen) __attribute__((hot));
+    void tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));
     GeneveHandlerENIHealthCheck check();
     bool hasGoneIdle(int timeout);
 
@@ -88,6 +88,13 @@ private:
     FlowCache<PacketHeaderV4, GwlbData> gwlbV4Cookies;
     FlowCache<PacketHeaderV6, GwlbData> gwlbV6Cookies;
 #endif
+
+    // Socket to write to our associated tunnel
+    TunSocket gwiWriter;
+    std::atomic<uint64_t> pktsOut{0}; 
+    std::atomic<uint64_t> bytesOut{0}; 
+    std::atomic<std::chrono::steady_clock::time_point> lastPacketOut;
+
     // Socket used by all threads for sending
     int sendingSock;
     const ghCallback createCallback;

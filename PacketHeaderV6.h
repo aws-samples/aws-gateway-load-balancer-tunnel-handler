@@ -15,7 +15,7 @@
 
 class PacketHeaderV6 {
 public:
-    PacketHeaderV6(unsigned char *pktbuf, ssize_t pktlen);   // pktbuf points to the start of the IP header.
+    PacketHeaderV6(unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));   // pktbuf points to the start of the IP header.
     
     bool operator==(const PacketHeaderV6 &ph) const
     {

@@ -19,7 +19,7 @@ typedef boost::container::small_vector<unsigned char, 40> GeneveHeader;
 class GenevePacket {
 public:
     GenevePacket();
-    GenevePacket(unsigned char *pktBuf, ssize_t pktLen);   // pktBuf points to the start of the Geneve header (i.e. after the outer UDP header)
+    GenevePacket(unsigned char *pktBuf, ssize_t pktLen) __attribute__((hot));   // pktBuf points to the start of the Geneve header (i.e. after the outer UDP header)
     
     eniid_t gwlbeEniId;         // The GWLBE ENI ID option, if it was found (check via the valid boolean)
     uint64_t attachmentId;       // The attachment ID option, if it was found

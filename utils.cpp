@@ -64,49 +64,67 @@ std::string stringFormat(const std::string& fmt_str, va_list ap)
  * @param from_port UDP source port to use
  * @param to_addr IP address to send the packet to.
  * @param to_port UDP destination port
- * @param pktBuf Payload buffer pointer
- * @param pktLen Payload buffer length
+ * @param payload_iov Scatter-gather array of payload buffers
+ * @param payload_iovcnt Number of entries in payload_iov
  * @return true if packet was sent successfully, false otherwise.
  */
-bool sendUdp(int sock, struct in_addr from_addr, uint16_t from_port, struct in_addr to_addr, uint16_t to_port, unsigned char *pktBuf, ssize_t pktLen)
+bool sendUdpSG(int sock, struct in_addr from_addr, uint16_t from_port,
+               struct in_addr to_addr, uint16_t to_port,
+               const struct iovec *payload_iov, int payload_iovcnt)
 {
-    // Build the IP header
-    uint8_t packet_buffer[16000];
-    struct iphdr *iph;
-    struct udphdr *udph;
-    iph = (struct iphdr *)&packet_buffer[0];
-    udph = (struct udphdr *)&packet_buffer[sizeof(struct iphdr)];
-    iph->version = 4;
-    iph->ihl = 5;
-    iph->tos = 0;
-    iph->tot_len = htons(sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen);
-    iph->id = 0;
-    iph->frag_off = 0;
-    iph->ttl = 2;
-    iph->protocol = IPPROTO_UDP;
-    iph->check = 0;
-    iph->saddr = from_addr.s_addr;
-    iph->daddr = to_addr.s_addr;
+    // Build headers on stack
+    struct {
+        struct iphdr ip;
+        struct udphdr udp;
+    } __attribute__((packed)) headers;
 
-    udph->source = htons(from_port);
-    udph->dest = htons(to_port);
-    udph->len = htons(sizeof(struct udphdr) + pktLen);
+    // Calculate total payload length
+    size_t total_payload = 0;
+    for(int i = 0; i < payload_iovcnt; i++) {
+        total_payload += payload_iov[i].iov_len;
+    }
 
-    memcpy(&packet_buffer[sizeof(struct iphdr) + sizeof(struct udphdr)], pktBuf, pktLen);
+    headers.ip.version = 4;
+    headers.ip.ihl = 5;
+    headers.ip.tos = 0;
+    headers.ip.tot_len = htons(sizeof(headers) + total_payload);
+    headers.ip.id = 0;
+    headers.ip.frag_off = 0;
+    headers.ip.ttl = 2;
+    headers.ip.protocol = IPPROTO_UDP;
+    headers.ip.check = 0;
+    headers.ip.saddr = from_addr.s_addr;
+    headers.ip.daddr = to_addr.s_addr;
 
-    // Linux will return an EINVAL if we have an addr with a non-zero sin_port.
+    headers.udp.source = htons(from_port);
+    headers.udp.dest = htons(to_port);
+    headers.udp.len = htons(sizeof(struct udphdr) + total_payload);
+
+    // Build iovec array: headers + payload segments
+    struct iovec iov[payload_iovcnt + 1];
+    iov[0].iov_base = &headers;
+    iov[0].iov_len = sizeof(headers);
+
+    // Copy payload iovec entries
+    for(int i = 0; i < payload_iovcnt; i++) {
+        iov[i + 1] = payload_iov[i];
+    }
+
     struct sockaddr_in to_zero_port;
     to_zero_port.sin_family = AF_INET;
     to_zero_port.sin_port = 0;
     to_zero_port.sin_addr.s_addr = to_addr.s_addr;
 
-    if(sendto(sock, packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen, 0, (struct sockaddr *)&to_zero_port, sizeof(to_zero_port)) < 0)
-    {
-        LOG(LS_UDP, LL_IMPORTANT, "Unable to send UDP packet. Parameters were %d, %p, %d, %d, %d, %d", sock, packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen, 0, (struct sockaddr *)&to_addr, sizeof(to_addr));
-        LOGHEXDUMP(LS_UDP, LL_IMPORTANT, "UDP packet buffer", packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen);
+    struct msghdr msg = {};
+    msg.msg_name = &to_zero_port;
+    msg.msg_namelen = sizeof(to_zero_port);
+    msg.msg_iov = iov;
+    msg.msg_iovlen = payload_iovcnt + 1;
+
+    if(sendmsg(sock, &msg, 0) < 0) {
+        LOG(LS_UDP, LL_IMPORTANT, "Unable to send UDP packet: %s", strerror(errno));
         return false;
     }
-
     return true;
 }
 

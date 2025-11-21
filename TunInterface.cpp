@@ -113,23 +113,6 @@ void TunInterface::shutdown()
 }
 
 /**
- * Send a packet out the TUN interface. Updates internal counters as well.
- *
- * @param pkt Buffer pointing to the packet to send
- * @param pktlen Packet length
- */
-void TunInterface::writePacket(unsigned char *pkt, ssize_t pktlen)
-{
-    if(!writerHandles.visit(pthread_self(), [&](auto& target) { target.second.write((void *)pkt, pktlen); }))
-    {
-        // Key wasn't found - create and send.
-        writerHandles.try_emplace_or_visit(pthread_self(), devname, [&](auto& target) { target.second.write((void *)pkt, pktlen); });
-    }
-    lastPacket = std::chrono::steady_clock::now();
-    pktsOut ++; bytesOut += pktlen;
-}
-
-/**
  * Human-readable status check of the module.
  *
  * @return A HealthCheck class

@@ -16,7 +16,7 @@
 
 class PacketHeaderV4 {
 public:
-    PacketHeaderV4(unsigned char *pktbuf, ssize_t pktlen);   // pktbuf points to the start of the IP header.
+    PacketHeaderV4(unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));   // pktbuf points to the start of the IP header.
     std::string text() const;
 
     /**

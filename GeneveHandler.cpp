@@ -202,7 +202,9 @@ GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& 
 #else
     devOutName("none"s),
 #endif
-        createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback))
+        createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)),
+        lastPacketOut(std::chrono::steady_clock::now()),
+        gwiWriter(devname_make(eni, true))
 {
     // Set up a socket we use for sending traffic out for ENI.
     tunnelIn = std::make_unique<TunInterface>(devInName, GWLB_MTU, tunThreadConfig, std::bind(&GeneveHandlerENI::tunReceiverCallback, this, std::placeholders::_1, std::placeholders::_2));
@@ -238,6 +240,8 @@ GeneveHandlerENI::~GeneveHandlerENI()
  * @param pkt The packet received.
  * @param pktlen Length of packet received.
  */
+thread_local unsigned char genevePktBuffer[16000];
+
 void GeneveHandlerENI::tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen)
 {
     LOG(LS_TUNNEL, LL_DEBUG, "Received a packet of " + ts(pktlen) + " bytes for ENI Id:" + eniStr);
@@ -292,17 +296,15 @@ void GeneveHandlerENI::tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen
             }
         }
 
-        auto headerLen = gd.header.size();
-        // Build the packet to send back to GWLB.
-        // Following as per https://aws.amazon.com/blogs/networking-and-content-delivery/integrate-your-custom-logic-or-appliance-with-aws-gateway-load-balancer/
-        unsigned char *genevePkt = new unsigned char[pktlen + headerLen];
-        // Encapsulate this packet with the original Geneve header
-        memcpy(genevePkt, &gd.header.front(), headerLen);
-        // Copy the packet in after the Geneve header.
-        memcpy(genevePkt + headerLen, pktbuf, pktlen);
-        // Swap source and destination IP addresses, but preserve ports, and send back to GWLB.
-        sendUdp(sendingSock, gd.dstAddr, gd.srcPort, gd.srcAddr, gd.dstPort, genevePkt, pktlen + headerLen);
-        delete[] genevePkt;
+        // Build scatter-gather array pointing to existing data
+        struct iovec payload[2];
+        payload[0].iov_base = (void*)&gd.header.front();  // Geneve header (already in memory)
+        payload[0].iov_len = gd.header.size();
+        payload[1].iov_base = pktbuf;                    // Original packet (already in memory)
+        payload[1].iov_len = pktlen;
+
+        // Send scatter-gather
+        sendUdpSG(sendingSock, gd.dstAddr, gd.srcPort, gd.srcAddr, gd.dstPort, payload, 2);
     } catch(std::invalid_argument& err) {
         LOG(LS_TUNNEL, LL_DEBUG, "Packet processor has a malformed packet: "s + err.what());
         return;
@@ -322,10 +324,10 @@ void GeneveHandlerENI::udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssiz
 {
     auto headerLen = gd.header.size();
     try {
-        if( (pktlen - headerLen) > (ssize_t)sizeof(struct ip) )
+        if(__builtin_expect((pktlen - headerLen) > (ssize_t)sizeof(struct ip), 1))
         {
             struct ip *iph = (struct ip *)(pkt + headerLen);
-            if(iph->ip_v == (unsigned int)4)
+            if(__builtin_expect(iph->ip_v == (unsigned int)4, 1))
             {
 #ifndef NO_RETURN_TRAFFIC
                 auto ph = PacketHeaderV4(pkt + headerLen, pktlen - headerLen);
@@ -333,15 +335,21 @@ void GeneveHandlerENI::udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssiz
                 gwlbV4Cookies.insert(std::move(ph), std::move(gd));
 #endif
                 // Route the decap'ed packet to our tun interface.
-                (*tunnelIn).writePacket(pkt + headerLen, pktlen - headerLen);
-            } else if(iph->ip_v == (unsigned int)6) {
+                gwiWriter.write(pkt + headerLen, pktlen - headerLen);
+                lastPacketOut = std::chrono::steady_clock::now();
+                pktsOut++; 
+                bytesOut += (pktlen - headerLen);                
+            } else if(__builtin_expect(iph->ip_v == (unsigned int)6, 0)) {
 #ifndef NO_RETURN_TRAFFIC
                 auto ph = PacketHeaderV6(pkt + headerLen, pktlen - headerLen);
                 // Ensure flow is in flow cache.
                 gwlbV6Cookies.insert(std::move(ph), std::move(gd));
 #endif
                 // Route the decap'ed packet to our tun interface.
-                (*tunnelIn).writePacket(pkt + headerLen, pktlen - headerLen);
+                gwiWriter.write(pkt + headerLen, pktlen - headerLen);
+                lastPacketOut = std::chrono::steady_clock::now();
+                pktsOut++; 
+                bytesOut += (pktlen - headerLen);                
             } else {
                 LOG(LS_UDP, LL_DEBUG, "Got a strange IP protocol version - "s  + ts(iph->ip_v) + " at offset " + ts(headerLen) + ". Dropping packet.");
             }
