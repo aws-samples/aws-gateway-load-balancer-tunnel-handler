@@ -55,7 +55,7 @@ private:
 
 std::ostream &operator<<(std::ostream &os, PacketHeaderV4 const &m);
 
-template<> struct std::hash<PacketHeaderV4>:unary_function<PacketHeaderV4, size_t> { 
+template<> struct std::hash<PacketHeaderV4> {
     std::size_t operator()(const PacketHeaderV4& t) const
     {
         return t.hash();
