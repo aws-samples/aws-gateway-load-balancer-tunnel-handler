@@ -66,6 +66,7 @@ public:
 
 private:
     int fd;
+    std::string devname;   // Used for log messages
 };
 
 class TunInterfaceThread {

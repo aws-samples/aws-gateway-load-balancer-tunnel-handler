@@ -325,9 +325,6 @@ std::string TunInterfaceHealthCheck::output_str()
 
     ret += "Interface "s + devname + ":\n"s;
 
-    ret += std::to_string(pktsOut) + " packets out to OS, "s + std::to_string(bytesOut) + " bytes out to OS, "s;
-    ret += timepointDeltaString(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n";
-
     for(auto &t : thcs)
     {
         ret += t.output_str();
@@ -342,8 +339,9 @@ json TunInterfaceHealthCheck::output_json()
 {
     json ret;
 
-    ret = { {"devname", devname}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"secsSincelastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacket)} ,
-            {"threads", json::array()} };
+    //ret = { {"devname", devname}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"secsSincelastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacket)} ,
+    //        {"threads", json::array()} };
+    ret = { {"devname", devname}, {"threads", json::array()} };
 
     for(auto &t : thcs)
     {
@@ -365,12 +363,17 @@ TunSocket::TunSocket() : fd(-1) {}
 
 void TunSocket::connect(const std::string devname)
 {
-    if(fd >= 0)
+    LOG(LS_OS, LL_DEBUG, "Opening TUN device for dev "s + devname + " and thread ID "s + ts(gettid()));
+    if(fd >= 0) {
+        LOG(LS_OS, LL_DEBUG, "Closing existing TUN fd "s + ts(fd) + " for dev "s + this->devname + " before opening new one for thread ID "s + ts(gettid()));
         close(fd);
+    }
+
+    this->devname = devname;
 
     if((fd = open("/dev/net/tun", O_RDWR)) < 0)
     {
-        LOG(LS_TUNNEL, LL_CRITICAL, "Unable to open /dev/net/tun: "s + std::error_code{errno, std::generic_category()}.message());
+        LOG(LS_OS, LL_CRITICAL, "Unable to open /dev/net/tun: "s + std::error_code{errno, std::generic_category()}.message());
         throw std::system_error(errno, std::generic_category(), "Unable to open /dev/net/tun");
     }
 
@@ -386,7 +389,7 @@ void TunSocket::connect(const std::string devname)
     {
         close(fd);
         fd = -1;
-        LOG(LS_TUNNEL, LL_CRITICAL, "Unable to create TUN device " + devname + " (does this process have CAP_NET_ADMIN capability?) " + std::error_code{errno, std::generic_category()}.message());
+        LOG(LS_OS, LL_CRITICAL, "Unable to create TUN device " + devname + " (does this process have CAP_NET_ADMIN capability?) " + std::error_code{errno, std::generic_category()}.message());
         throw std::system_error(errno, std::generic_category(), "Unable to create TUN device (does this process have CAP_NET_ADMIN capability?)");
     }
 }
@@ -398,8 +401,10 @@ TunSocket::TunSocket(const std::string devname) : fd(-1)
 
 TunSocket::~TunSocket()
 {
-    if(fd >= 0)
+    if(fd >= 0) {
+        LOG(LS_OS, LL_DEBUG, "Destroying TUN socket for devname "s + devname + " for thread ID "s + ts(gettid()));
         close(fd);
+    }
 }
 
 TunSocket::TunSocket(TunSocket&& other) noexcept : fd(other.fd)
@@ -415,6 +420,7 @@ TunSocket& TunSocket::operator=(TunSocket&& other) noexcept
             close(fd);
 
         fd = other.fd;
+        devname = other.devname;
         other.fd = -1;
     }
     return *this;
