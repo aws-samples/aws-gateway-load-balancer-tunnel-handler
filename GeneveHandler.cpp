@@ -41,7 +41,7 @@ GwlbData::GwlbData() {}
  * @param dstPort Destination port of the GENEVE packet
  */
 GwlbData::GwlbData(GeneveHeader header, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort) :
-        header(std::move(header)), srcAddr(*srcAddr), dstAddr(*dstAddr), srcPort(srcPort), dstPort(dstPort)
+       srcAddr(*srcAddr), dstAddr(*dstAddr), srcPort(srcPort), dstPort(dstPort),  header(std::move(header))
 {
 }
 
@@ -198,13 +198,13 @@ GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& 
 #ifndef NO_RETURN_TRAFFIC
         devOutName(devname_make(eni, false)),
         gwlbV4Cookies("IPv4 Flow Cache for ENI " + eniStr, cacheTimeout), gwlbV6Cookies("IPv6 Flow Cache for ENI " + eniStr, cacheTimeout),
-        sendingSock(-1),
 #else
     devOutName("none"s),
 #endif
-        createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)),
+        gwiWriter(devname_make(eni, true)),
         lastPacketOut(std::chrono::steady_clock::now()),
-        gwiWriter(devname_make(eni, true))
+        sendingSock(-1),
+        createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback))
 {
     // Set up a socket we use for sending traffic out for ENI.
     tunnelIn = std::make_unique<TunInterface>(devInName, GWLB_MTU, tunThreadConfig, std::bind(&GeneveHandlerENI::tunReceiverCallback, this, std::placeholders::_1, std::placeholders::_2));
@@ -217,7 +217,9 @@ GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& 
     try {
         this->createCallback(devInName, devOutName, this->eni);
     } catch(...) {
+#ifndef NO_RETURN_TRAFFIC
         close(sendingSock);
+#endif
         throw;
     }
 }
@@ -364,24 +366,26 @@ void GeneveHandlerENI::udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssiz
  * Perform a health check on this ENI, and return some information.
  * @return
  */
+GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(std::string eniStr,
+                                                         uint64_t pktsOut, uint64_t bytesOut, std::chrono::steady_clock::time_point lastPacketOut,
+                                                         TunInterfaceHealthCheck tunnelIn
 #ifndef NO_RETURN_TRAFFIC
-GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(std::string eniStr, TunInterfaceHealthCheck tunnelIn, TunInterfaceHealthCheck tunnelOut, FlowCacheHealthCheck v4FlowCache, FlowCacheHealthCheck v6FlowCache) :
-        eniStr(eniStr), tunnelIn(std::move(tunnelIn)), tunnelOut(std::move(tunnelOut)), v4FlowCache(std::move(v4FlowCache)), v6FlowCache(std::move(v6FlowCache))
-{
-}
-#else
-GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(std::string eniStr, TunInterfaceHealthCheck tunnelIn) :
-    eniStr(eniStr), tunnelIn(std::move(tunnelIn))
-{
-}
+                                                         , TunInterfaceHealthCheck tunnelOut, FlowCacheHealthCheck v4FlowCache, FlowCacheHealthCheck v6FlowCache
 #endif
+                                                         ) :
+        eniStr(eniStr), pktsOut(pktsOut), bytesOut(bytesOut), lastPacketOut(lastPacketOut), tunnelIn(std::move(tunnelIn))
+#ifndef NO_RETURN_TRAFFIC
+        , tunnelOut(std::move(tunnelOut)), v4FlowCache(std::move(v4FlowCache)), v6FlowCache(std::move(v6FlowCache))
+#endif
+{
+}
 
 std::string GeneveHandlerENIHealthCheck::output_str()
 {
     std::stringstream ret;
 
     ret << "Handler for ENI " << eniStr << std::endl;
-
+    ret << std::to_string(pktsOut) << " packets out to OS, " << std::to_string(bytesOut) << " bytes out to OS, " << timepointDeltaString(std::chrono::steady_clock::now(), lastPacketOut) + " since last packet.\n";
     ret << tunnelIn.output_str();
 #ifndef NO_RETURN_TRAFFIC
     ret << tunnelOut.output_str();
@@ -394,21 +398,20 @@ std::string GeneveHandlerENIHealthCheck::output_str()
 
 json GeneveHandlerENIHealthCheck::output_json()
 {
+    return {{"eniStr", eniStr}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"secsSinceLastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacketOut)}, {"tunnelIn", tunnelIn.output_json()}
 #ifndef NO_RETURN_TRAFFIC
-    return {{"eniStr", eniStr}, {"tunnelIn", tunnelIn.output_json()}, {"tunnelOut", tunnelOut.output_json()}, {"v4FlowCache", v4FlowCache.output_json()}, {"v6FlowCache", v6FlowCache.output_json()}};
-#else
-    return {{"eniStr", eniStr}, {"tunnelIn", tunnelIn.output_json()}};
+    , {"tunnelOut", tunnelOut.output_json()}, {"v4FlowCache", v4FlowCache.output_json()}, {"v6FlowCache", v6FlowCache.output_json()}
 #endif
-    // TODO.
+    };
 }
 
 GeneveHandlerENIHealthCheck GeneveHandlerENI::check()
 {
+    return { eniStr, pktsOut.load(), bytesOut.load(), lastPacketOut.load(), tunnelIn->status()
 #ifndef NO_RETURN_TRAFFIC
-    return { eniStr, tunnelIn->status(), tunnelOut->status(), gwlbV4Cookies.check(), gwlbV6Cookies.check()};
-#else
-    return { eniStr, tunnelIn->status() };
+             , tunnelOut->status(), gwlbV4Cookies.check(), gwlbV6Cookies.check()
 #endif
+    };
 }
 
 /**
@@ -420,8 +423,9 @@ bool GeneveHandlerENI::hasGoneIdle(int timeout)
 {
     std::chrono::steady_clock::time_point expireTime = std::chrono::steady_clock::now() - std::chrono::seconds(timeout);
 
-    if(tunnelIn->lastPacketTime() > expireTime) return false;
+    if(lastPacketOut.load() > expireTime) return false;
 #ifndef NO_RETURN_TRAFFIC
+    if(tunnelIn->lastPacketTime() > expireTime) return false;
     if(tunnelOut->lastPacketTime() > expireTime) return false;
 #endif
     return true;
