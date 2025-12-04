@@ -2,6 +2,59 @@
 
 This document tracks significant architectural changes to the Gateway Load Balancer Tunnel Handler (gwlbtun).
 
+## 2025-12-04: Removed SO_RCVTIMEO Socket Option
+
+### Change Type
+Simplification / Code Cleanup
+
+### Files Modified
+- `UDPPacketReceiver.cpp`
+
+### Change Description
+Removed the `SO_RCVTIMEO` socket option that was previously added for shutdown reliability. The `recvmmsg()` timeout parameter combined with the socket shutdown in `UDPPacketReceiverThread::shutdown()` provides sufficient shutdown handling without the redundant socket-level timeout.
+
+### Architectural Impact Summary
+
+**High-Level Changes**:
+- Removed `SO_RCVTIMEO` socket configuration from `UDPPacketReceiverThread::setup()`
+- Shutdown now relies solely on:
+  1. `recvmmsg()` timeout parameter (1 second)
+  2. Socket shutdown via `::shutdown(sock, SHUT_RDWR)` in `UDPPacketReceiverThread::shutdown()`
+
+**Rationale**:
+- The `recvmmsg()` timeout parameter already provides periodic returns for shutdown checks
+- The `::shutdown(sock, SHUT_RDWR)` call immediately interrupts any blocking `recvmmsg()`
+- `SO_RCVTIMEO` was redundant and added unnecessary complexity
+
+**Shutdown Mechanism (Current)**:
+```
+UDPPacketReceiverThread::shutdown()
+        │
+        ├── shutdownRequested = true
+        │
+        └── ::shutdown(sock, SHUT_RDWR)  ──► Interrupts recvmmsg()
+                                               │
+                                               ▼
+                                         Thread exits cleanly
+```
+
+### Components Affected
+
+| Component | Impact | Details |
+|-----------|--------|---------|
+| UDPPacketReceiverThread::setup() | Simplified | Removed SO_RCVTIMEO configuration |
+| Shutdown handling | Unchanged | Still reliable via socket shutdown |
+
+### Migration Notes
+- No configuration changes required
+- No behavioral changes for users
+- Slightly reduced code complexity
+
+### Related Documentation
+- [UDP_BATCH_PROCESSING.md](./UDP_BATCH_PROCESSING.md) - Batch processing architecture
+
+---
+
 ## 2025-12-03: UDP Batch Processing with recvmmsg()
 
 ### Change Type

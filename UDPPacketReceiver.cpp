@@ -317,21 +317,25 @@ int UDPPacketReceiverThread::threadFunction()
 
     // Receive loop - use recvmmsg() for batch processing, no select() overhead
     // MSG_WAITFORONE: return as soon as at least one packet is available
-    struct timespec timeout;
-    timeout.tv_sec = 1;
-    timeout.tv_nsec = 0;
-    
+    // No timeout - shutdown() on the socket will interrupt the blocking call
     while(!shutdownRequested)
     {
-        // Receive batch of packets - blocks until at least one arrives or timeout
-        int numPkts = recvmmsg(sock, msgs, BATCH_SIZE, MSG_WAITFORONE, &timeout);
+        // Receive batch of packets - blocks until at least one arrives
+        // Socket shutdown() from another thread will interrupt this call
+        int numPkts = recvmmsg(sock, msgs, BATCH_SIZE, MSG_WAITFORONE, nullptr);
         
         if(numPkts < 0)
         {
-            if(errno == EINTR && shutdownRequested)
+            // Check for shutdown-related errors
+            if(shutdownRequested)
                 break;
+            if(errno == EINTR)
+                continue;
             if(errno == EAGAIN || errno == EWOULDBLOCK)
                 continue;
+            // EBADF or ENOTCONN means socket was shutdown - exit cleanly
+            if(errno == EBADF || errno == ENOTCONN)
+                break;
             LOG(LS_UDP, LL_IMPORTANT, "recvmmsg error: "s + std::error_code{errno, std::generic_category()}.message());
             continue;
         }
@@ -409,7 +413,12 @@ UDPPacketReceiverThreadHealthCheck UDPPacketReceiverThread::status()
 void UDPPacketReceiverThread::shutdown()
 {
     shutdownRequested = true;
-    // The std::async threads will see that boolean change within 1 second, then exit.
+    // Close the socket to interrupt any blocking recvmmsg() call
+    // This ensures immediate shutdown rather than waiting for timeout
+    if(sock >= 0)
+    {
+        ::shutdown(sock, SHUT_RDWR);
+    }
 }
 
 

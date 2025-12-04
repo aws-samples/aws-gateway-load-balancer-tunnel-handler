@@ -146,12 +146,14 @@ while(!shutdownRequested) {
 }
 ```
 
-### Key Flags
+### Key Flags and Socket Options
 
-| Flag | Purpose |
-|------|---------|
+| Flag/Option | Purpose |
+|-------------|---------|
 | `MSG_WAITFORONE` | Return immediately after first packet arrives (don't wait for full batch) |
-| Timeout: 1 sec | Allows shutdown check if no traffic |
+| `recvmmsg()` timeout (1 sec) | Timeout parameter ensures periodic returns for shutdown checks |
+| `SO_BUSY_POLL` (50 µs) | Reduces latency by polling NIC more frequently (Linux 3.11+) |
+| Socket shutdown | `::shutdown(sock, SHUT_RDWR)` immediately interrupts blocking `recvmmsg()` for clean thread termination |
 
 ## Data Flow
 
@@ -248,5 +250,7 @@ net.core.rmem_default = 134217728
 
 | Date | Version | Description |
 |------|---------|-------------|
+| 2025-12-04 | 1.3 | Removed SO_RCVTIMEO; shutdown relies on recvmmsg() timeout + socket shutdown |
+| 2025-12-04 | 1.2 | Added SO_RCVTIMEO socket option for reliable shutdown handling |
 | 2025-12-03 | 1.1 | Added configurable socket receive buffer size (--rcvbuf option) |
 | 2025-12-03 | 1.0 | Initial batch processing implementation |
