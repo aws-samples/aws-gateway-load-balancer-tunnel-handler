@@ -1,6 +1,7 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: MIT-0
-
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. This material is AWS Content under the AWS Enterprise Agreement 
+ * or AWS Customer Agreement (as applicable) and is provided under the AWS Intellectual Property License.
+ */
 /**
  * TunInterface handles creating and processing traffic received on TUN interfaces. This class:
  * - Creates the requested Tun interface

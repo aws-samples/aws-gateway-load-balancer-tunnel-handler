@@ -1,6 +1,7 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: MIT-0
-
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. This material is AWS Content under the AWS Enterprise Agreement 
+ * or AWS Customer Agreement (as applicable) and is provided under the AWS Intellectual Property License.
+ */
 /**
  * Handles all of our Geneve tunnel functions:
  * - Launches a UDPPacketReceiver to receive packets on port 6081
@@ -58,14 +59,18 @@ std::string GwlbData::text()
  * @param createCallback Function to call when a new endpoint is seen.
  * @param destroyCallback Function to call when an endpoint has gone away and we need to clean up.
  * @param destroyTimeout How long to wait for an endpoint to be idle before calling destroyCallback.
+ * @param cacheTimeout Timeout for flow cache entries.
+ * @param udpThreads Thread configuration for UDP receiver threads.
+ * @param tunThreads Thread configuration for TUN interface threads.
+ * @param rcvBufSizeMB Socket receive buffer size in megabytes (default 128MB).
  */
-GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads)
+GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB)
         : healthy(true),
           createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)), eniDestroyTimeout(destroyTimeout), cacheTimeout(cacheTimeout),
           tunThreadConfig(std::move(tunThreads))
 {
     // Set up UDP receiver threads.
-    udpRcvr.setup(udpThreads, GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6));
+    udpRcvr.setup(udpThreads, GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6), rcvBufSizeMB);
 }
 
 /**

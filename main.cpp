@@ -1,6 +1,7 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: MIT-0
-
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. This material is AWS Content under the AWS Enterprise Agreement 
+ * or AWS Customer Agreement (as applicable) and is provided under the AWS Intellectual Property License.
+ */
 // GWLB Tunnel Handling user-space program. See the README.md for details on usage.
 
 #include <iostream>
@@ -155,6 +156,10 @@ void printHelp(char *progname)
             "  --tunaffinity AFFIN      Generate threads for each tunnel processor, pinned to the cores listed. Takes precedence over tunthreads.\n"
 #endif
             "\n"
+            "Performance options:\n"
+            "  --rcvbuf SIZE            Socket receive buffer size in megabytes. Default is 128MB.\n"
+            "                           For 50+ Gbps throughput, use 128-256MB. Requires net.core.rmem_max sysctl >= SIZE*1024*1024.\n"
+            "\n"
             "AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.\n"
             "It is recommended to have the same number of UDP threads as tunnel processor threads, in one-arm operation.\n"
             "If unspecified, the thread argument(s) will assume %d as a default, based on the number of cores present.\n"
@@ -200,6 +205,7 @@ int main(int argc, char *argv[])
     int healthCheck = 0, healthSocket;
     int tunnelTimeout = 0, cacheTimeout = 350;
     int udpthreads = numCores();
+    int rcvBufSizeMB = 128;  // Socket receive buffer size in MB (default 128MB for 50+ Gbps)
 #ifndef NO_RETURN_TRAFFIC
     int tunthreads = numCores();
 #endif
@@ -223,6 +229,7 @@ int main(int argc, char *argv[])
             {"tunthreads", required_argument, NULL, 0},    // optind 12
             {"tunaffinity", required_argument, NULL, 0},   // optind 13
 #endif
+            {"rcvbuf", required_argument, NULL, 0},        // optind 14 (or 12 in NO_RETURN_TRAFFIC mode)
             {0, 0, 0, 0}
     };
 
@@ -250,6 +257,13 @@ int main(int argc, char *argv[])
                         break;
                     case 13:
                         tunaffinity = std::string(optarg);
+                        break;
+                    case 14:
+                        rcvBufSizeMB = atoi(optarg);
+                        break;
+#else
+                    case 12:
+                        rcvBufSizeMB = atoi(optarg);
                         break;
 #endif
                 }
@@ -332,7 +346,7 @@ int main(int argc, char *argv[])
     tun.cfg.resize(0);
 #endif
 
-    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, cacheTimeout, udp, tun);
+    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, cacheTimeout, udp, tun, rcvBufSizeMB);
     struct timespec timeout;
     timeout.tv_sec = 1; timeout.tv_nsec = 0;
     fd_set fds;

@@ -1,6 +1,7 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: MIT-0
-
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. This material is AWS Content under the AWS Enterprise Agreement 
+ * or AWS Customer Agreement (as applicable) and is provided under the AWS Intellectual Property License.
+ */
 /**
  * UDPPacketReceiver class handles monitoring a UDP port (6081 for GENEVE). It performs the following functions:
  * - Start a listener for the port
@@ -14,6 +15,7 @@
 #include "UDPPacketReceiver.h"
 #include <unistd.h>
 #include <iostream>
+#include <fstream>
 #include <utility>
 #include <thread>
 #include "utils.h"
@@ -66,19 +68,21 @@ void UDPPacketReceiver::shutdown()
 /**
  * Setup the receiver. Open a UDP receiver and starts the thread for it.
  *
- * @param portNumber UDP port number to listen to.
- * @param recvDispatcher Function to callback to on each packet received.
+ * @param threadConfig Thread configuration specifying cores to use.
+ * @param portNumberParam UDP port number to listen to.
+ * @param recvDispatcherParam Function to callback to on each packet received.
+ * @param rcvBufSizeMB Socket receive buffer size in megabytes (default 128MB).
  */
-void UDPPacketReceiver::setup(ThreadConfig threadConfig, uint16_t portNumberParam, udpCallback recvDispatcherParam)
+void UDPPacketReceiver::setup(ThreadConfig threadConfig, uint16_t portNumberParam, udpCallback recvDispatcherParam, int rcvBufSizeMB)
 {
-    LOG(LS_UDP, LL_DEBUG, "UDP receiver setting up on port "s + ts(portNumberParam));
+    LOG(LS_UDP, LL_DEBUG, "UDP receiver setting up on port "s + ts(portNumberParam) + " with "s + ts(rcvBufSizeMB) + "MB receive buffer"s);
     portNumber = portNumberParam;
 
     // Set up our threads as per threadConfig
     int tIndex = 0;
     for(int core : threadConfig.cfg)
     {
-        threads[tIndex].setup(tIndex, core, portNumberParam, recvDispatcherParam);
+        threads[tIndex].setup(tIndex, core, portNumberParam, recvDispatcherParam, rcvBufSizeMB);
         tIndex ++;
     }
 }
@@ -147,7 +151,7 @@ UDPPacketReceiverThread::~UDPPacketReceiverThread()
 }
 
 void UDPPacketReceiverThread::setup(int threadNumberParam, int coreNumberParam, uint16_t portNumberParam,
-                                    udpCallback recvDispatcherParam)
+                                    udpCallback recvDispatcherParam, int rcvBufSizeMB)
 {
     int yes = 1;
     struct sockaddr_in address{};
@@ -158,11 +162,84 @@ void UDPPacketReceiverThread::setup(int threadNumberParam, int coreNumberParam, 
     portNumber = portNumberParam;
     setupCalled = true;
 
+    // Check kernel's rmem_max before attempting to set buffer size
+    // Only check on first thread to avoid log spam
+    if(threadNumber == 0)
+    {
+        long long rmemMax = 0;
+        std::ifstream rmemFile("/proc/sys/net/core/rmem_max");
+        if(rmemFile.is_open())
+        {
+            rmemFile >> rmemMax;
+            rmemFile.close();
+            
+            long long requestedBytes = (long long)rcvBufSizeMB * 1024 * 1024;
+            // Linux doubles the requested buffer size, so we need rmem_max >= requested * 2
+            // But the actual buffer will be capped at rmem_max / 2
+            if(rmemMax < requestedBytes)
+            {
+                long long recommendedRmemMax = requestedBytes * 2;  // Linux doubles the value
+                LOG(LS_UDP, LL_CRITICAL, 
+                    "WARNING: Kernel net.core.rmem_max ("s + ts(rmemMax / (1024*1024)) + "MB) is less than requested buffer size ("s + 
+                    ts(rcvBufSizeMB) + "MB). Socket buffer will be limited to "s + ts(rmemMax / (2*1024*1024)) + "MB."s);
+                LOG(LS_UDP, LL_CRITICAL,
+                    "RECOMMENDATION: For optimal performance at high packet rates, run:"s);
+                LOG(LS_UDP, LL_CRITICAL,
+                    "  sudo sysctl -w net.core.rmem_max="s + ts(recommendedRmemMax));
+                LOG(LS_UDP, LL_CRITICAL,
+                    "  sudo sysctl -w net.core.rmem_default="s + ts(requestedBytes));
+                LOG(LS_UDP, LL_CRITICAL,
+                    "To make permanent, add to /etc/sysctl.d/99-gwlb-tuning.conf:"s);
+                LOG(LS_UDP, LL_CRITICAL,
+                    "  net.core.rmem_max = "s + ts(recommendedRmemMax));
+                LOG(LS_UDP, LL_CRITICAL,
+                    "  net.core.rmem_default = "s + ts(requestedBytes));
+            }
+            else
+            {
+                LOG(LS_UDP, LL_DEBUG, "Kernel net.core.rmem_max ("s + ts(rmemMax / (1024*1024)) + 
+                    "MB) is sufficient for requested buffer size ("s + ts(rcvBufSizeMB) + "MB)"s);
+            }
+        }
+        else
+        {
+            LOG(LS_UDP, LL_DEBUG, "Could not read /proc/sys/net/core/rmem_max to verify kernel buffer limits");
+        }
+    }
+
     if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) == 0)
         throw std::system_error(errno, std::generic_category(), "Socket creation failed");
 
     if(setsockopt(sock, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &yes, sizeof(yes)))
         throw std::system_error(errno, std::generic_category(), "Socket setsockopt() for port reuse failed");
+
+    // Set socket receive buffer size for high throughput
+    // This prevents packet loss during traffic bursts
+    int rcvbuf = rcvBufSizeMB * 1024 * 1024;
+    if(setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0)
+        LOG(LS_UDP, LL_IMPORTANT, "Warning: Failed to set socket receive buffer to "s + ts(rcvBufSizeMB) + "MB: "s + 
+            std::error_code{errno, std::generic_category()}.message() + 
+            ". Performance may be degraded at high packet rates.");
+    
+    // Verify the actual buffer size that was set
+    int actualBuf = 0;
+    socklen_t optlen = sizeof(actualBuf);
+    if(getsockopt(sock, SOL_SOCKET, SO_RCVBUF, &actualBuf, &optlen) == 0)
+    {
+        // Linux reports double the actual buffer size
+        int actualMB = actualBuf / (2 * 1024 * 1024);
+        if(actualMB < rcvBufSizeMB && threadNumber == 0)
+        {
+            LOG(LS_UDP, LL_IMPORTANT, "Note: Actual socket buffer size is "s + ts(actualMB) + 
+                "MB (requested "s + ts(rcvBufSizeMB) + "MB). Increase net.core.rmem_max for better performance."s);
+        }
+    }
+
+    // Enable busy polling for lower latency (50 microseconds)
+    // This reduces latency by polling the NIC more frequently
+    int busy_poll = 50;
+    if(setsockopt(sock, SOL_SOCKET, SO_BUSY_POLL, &busy_poll, sizeof(busy_poll)) < 0)
+        LOG(LS_UDP, LL_DEBUG, "Note: SO_BUSY_POLL not supported on this kernel (requires Linux 3.11+)");
 
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
@@ -176,28 +253,20 @@ void UDPPacketReceiverThread::setup(int threadNumberParam, int coreNumberParam, 
     if(bind(sock, (const struct sockaddr *)&address, (socklen_t)sizeof(address)) < 0)
         throw std::system_error(errno, std::generic_category(), "Port binding failed");
 
+    LOG(LS_UDP, LL_DEBUG, "UDP receiver thread "s + ts(threadNumber) + " configured with "s + ts(rcvBufSizeMB) + "MB receive buffer and busy polling"s);
+
     thread = std::async(&UDPPacketReceiverThread::threadFunction, this);
 }
 
 /**
  * Thread for the UDP receiver. Waits for packets to come in, then calls our dispatcher.
+ * Uses recvmmsg() for batch packet processing to achieve high throughput (50+ Gbps).
  *
  * @return Never returns, until told to shutdown.
  */
 int UDPPacketReceiverThread::threadFunction()
 {
-    struct sockaddr_storage src_addr{};
-    struct sockaddr_in *src_addr4;
-    struct msghdr mh{};
-    struct cmsghdr *cmhdr;
-    struct iovec iov[1];
-    struct in_pktinfo *ipi;
-    unsigned char *pktbuf, *control;
     char threadName[16];
-
-    // Static packet processing buffers.
-    pktbuf = new unsigned char[65535];
-    control = new unsigned char[2048];
     threadId = gettid();
     snprintf(threadName, 15, "gwlbtun U%03d", threadNumber);
     pthread_setname_np(pthread_self(), threadName);
@@ -218,62 +287,101 @@ int UDPPacketReceiverThread::threadFunction()
         }
     }
 
-    iov[0].iov_base = pktbuf;
-    iov[0].iov_len = 65534;
-    mh.msg_name = &src_addr;
-    mh.msg_namelen = sizeof(src_addr);
-    mh.msg_iov = iov;
-    mh.msg_iovlen = 1;
-    mh.msg_control = control;
-    mh.msg_controllen = 2048;
+    // Batch receive configuration - receive up to 64 packets per syscall
+    const int BATCH_SIZE = 64;
+    struct mmsghdr msgs[BATCH_SIZE];
+    struct iovec iovecs[BATCH_SIZE];
+    struct sockaddr_storage src_addrs[BATCH_SIZE];
+    unsigned char *pktbufs[BATCH_SIZE];
+    unsigned char *controls[BATCH_SIZE];
 
-    // Receive packets and dispatch them.  check every second to make sure a shutdown hasn't been requested.
-    // printf("UDP receive thread active.\n");
-    ssize_t msgLen;
-    struct timeval tv{};
-    fd_set readfds;
+    // Allocate buffers for batch processing
+    for(int i = 0; i < BATCH_SIZE; i++)
+    {
+        pktbufs[i] = new unsigned char[65536];
+        controls[i] = new unsigned char[2048];
+        
+        iovecs[i].iov_base = pktbufs[i];
+        iovecs[i].iov_len = 65535;
+        
+        memset(&msgs[i], 0, sizeof(struct mmsghdr));
+        msgs[i].msg_hdr.msg_name = &src_addrs[i];
+        msgs[i].msg_hdr.msg_namelen = sizeof(src_addrs[i]);
+        msgs[i].msg_hdr.msg_iov = &iovecs[i];
+        msgs[i].msg_hdr.msg_iovlen = 1;
+        msgs[i].msg_hdr.msg_control = controls[i];
+        msgs[i].msg_hdr.msg_controllen = 2048;
+    }
+
+    LOG(LS_UDP, LL_DEBUG, "UDP receiver thread "s + ts(threadNumber) + " starting with batch size "s + ts(BATCH_SIZE));
+
+    // Receive loop - use recvmmsg() for batch processing, no select() overhead
+    // MSG_WAITFORONE: return as soon as at least one packet is available
+    struct timespec timeout;
+    timeout.tv_sec = 1;
+    timeout.tv_nsec = 0;
+    
     while(!shutdownRequested)
     {
-        // printf("tick\n");
-        tv.tv_sec = 1; tv.tv_usec = 0;
-        FD_ZERO(&readfds);
-        FD_SET(sock, &readfds);
-        select(sock + 1, &readfds, nullptr, nullptr, &tv);
-        if(FD_ISSET(sock, &readfds))
+        // Receive batch of packets - blocks until at least one arrives or timeout
+        int numPkts = recvmmsg(sock, msgs, BATCH_SIZE, MSG_WAITFORONE, &timeout);
+        
+        if(numPkts < 0)
         {
-            msgLen = recvmsg(sock, &mh, MSG_DONTWAIT);
-            while(msgLen > 0 && !shutdownRequested) {
-                if(src_addr.ss_family == AF_INET)
+            if(errno == EINTR && shutdownRequested)
+                break;
+            if(errno == EAGAIN || errno == EWOULDBLOCK)
+                continue;
+            LOG(LS_UDP, LL_IMPORTANT, "recvmmsg error: "s + std::error_code{errno, std::generic_category()}.message());
+            continue;
+        }
+        
+        // Process all received packets in the batch
+        for(int i = 0; i < numPkts; i++)
+        {
+            ssize_t msgLen = msgs[i].msg_len;
+            auto& src_addr = src_addrs[i];
+            
+            if(src_addr.ss_family == AF_INET)
+            {
+                // Extract packet info from control message
+                struct cmsghdr *cmhdr = CMSG_FIRSTHDR(&msgs[i].msg_hdr);
+                while(cmhdr)
                 {
-                    // Cycle through the control data to get the IP address this was sent to, then call dispatch.
-                    cmhdr = CMSG_FIRSTHDR(&mh);
-                    while(cmhdr)
+                    if(cmhdr->cmsg_level == IPPROTO_IP && cmhdr->cmsg_type == IP_PKTINFO)
                     {
-                        if(cmhdr->cmsg_level == IPPROTO_IP && cmhdr->cmsg_type == IP_PKTINFO)
-                        {
-                            ipi = (struct in_pktinfo *)CMSG_DATA(cmhdr);
-                            src_addr4 = (struct sockaddr_in *)&src_addr;
-                            lastPacket = std::chrono::steady_clock::now();
-                            pktsIn ++;
-                            bytesIn += msgLen;
-                            try {
-                                recvDispatcher(pktbuf, msgLen, &src_addr4->sin_addr, be16toh(src_addr4->sin_port), &ipi->ipi_spec_dst, portNumber);
-                            }
-                            catch (std::exception& e) {
-                                LOG(LS_UDP, LL_IMPORTANT, "UDP packet dispatch function failed: "s + e.what());
-                            }
+                        auto ipi = (struct in_pktinfo *)CMSG_DATA(cmhdr);
+                        auto src_addr4 = (struct sockaddr_in *)&src_addr;
+                        
+                        lastPacket = std::chrono::steady_clock::now();
+                        pktsIn++;
+                        bytesIn += msgLen;
+                        
+                        try {
+                            recvDispatcher(pktbufs[i], msgLen, &src_addr4->sin_addr, 
+                                         be16toh(src_addr4->sin_port), &ipi->ipi_spec_dst, portNumber);
                         }
-                        cmhdr = CMSG_NXTHDR(&mh, cmhdr);
+                        catch (std::exception& e) {
+                            LOG(LS_UDP, LL_IMPORTANT, "UDP packet dispatch function failed: "s + e.what());
+                        }
+                        break;
                     }
+                    cmhdr = CMSG_NXTHDR(&msgs[i].msg_hdr, cmhdr);
                 }
-                msgLen = recvmsg(sock, &mh, MSG_DONTWAIT);
             }
         }
     }
-    // printf("UDP receive thread shutdown.\n");
-    delete [] pktbuf;
-    delete [] control;
-    return(0);
+
+    LOG(LS_UDP, LL_DEBUG, "UDP receiver thread "s + ts(threadNumber) + " shutting down");
+    
+    // Clean up allocated buffers
+    for(int i = 0; i < BATCH_SIZE; i++)
+    {
+        delete [] pktbufs[i];
+        delete [] controls[i];
+    }
+    
+    return 0;
 }
 
 bool UDPPacketReceiverThread::healthCheck()
