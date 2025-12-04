@@ -222,6 +222,7 @@ if(numPkts < 0) {
 ### Memory
 - Additional ~4 MB per UDP receiver thread
 - For 48 threads: ~200 MB additional memory
+- For 256 threads (maximum): ~1.1 GB additional memory
 
 ### Sysctl Settings
 ```bash

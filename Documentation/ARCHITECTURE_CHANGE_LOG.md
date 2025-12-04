@@ -2,6 +2,67 @@
 
 This document tracks significant architectural changes to the Gateway Load Balancer Tunnel Handler (gwlbtun).
 
+## 2025-12-04: Increased MAX_THREADS from 128 to 256
+
+### Change Type
+Configuration - Scalability Enhancement
+
+### Files Modified
+- `utils.h` (line 37)
+
+### Change Description
+Increased the `MAX_THREADS` preprocessor constant from 128 to 256, doubling the maximum number of UDP receiver threads that can be configured via the `--udpaffinity` option.
+
+### Architectural Impact Summary
+
+**High-Level Changes**:
+- Maximum configurable UDP receiver threads increased from 128 to 256
+- Enables support for high-core-count systems (e.g., 192+ vCPU instances)
+- No changes to thread behavior or memory allocation patterns
+
+**Use Case**:
+- AWS instances with 192+ vCPUs (e.g., c7i.48xlarge, m7i.48xlarge)
+- Environments requiring dedicated threads per core for maximum throughput
+- High-density packet processing scenarios targeting 100+ Gbps
+
+### Components Affected
+
+| Component | Impact | Details |
+|-----------|--------|---------|
+| ThreadConfig struct | Unchanged | Vector-based, dynamically sized |
+| UDPPacketReceiverThread array | Potential | Static array size uses MAX_THREADS |
+| Command-line parsing | Unchanged | Validates against MAX_THREADS |
+| Memory footprint | Increased | ~4.3 MB per thread when active |
+
+### Memory Considerations
+
+With 256 threads at full utilization:
+- Per-thread batch buffers: ~4.3 MB × 256 = ~1.1 GB
+- Only active threads allocate buffers
+- Threads are allocated based on `--udpaffinity` configuration
+
+### Migration Notes
+- No configuration changes required for existing deployments
+- Existing `--udpaffinity` configurations continue to work
+- New deployments can now specify up to 256 threads
+
+### Usage Example
+```bash
+# Previous maximum (128 threads)
+./gwlbtun --udpaffinity 0-127
+
+# New maximum (256 threads)
+./gwlbtun --udpaffinity 0-255
+
+# Typical high-performance deployment (192 vCPU instance)
+./gwlbtun --udpaffinity 0-191
+```
+
+### Related Documentation
+- [UDP_BATCH_PROCESSING.md](./UDP_BATCH_PROCESSING.md) - Thread and buffer architecture
+
+---
+
 ## 2025-12-04: Removed SO_RCVTIMEO Socket Option
 
 ### Change Type

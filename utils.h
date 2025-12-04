@@ -34,7 +34,7 @@ using namespace std::string_literals;
 #define NO_RETURN_TRAFFIC
 
 // Thread configuration parser and data struct
-#define MAX_THREADS    128
+#define MAX_THREADS    256
 typedef struct ThreadConfigStruct {
     std::vector<int> cfg;
 } ThreadConfig;
