@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.13)
 project(gwlbtun)
 set(CMAKE_CXX_STANDARD 17)
+
+# Suppress FindBoost deprecation warning in CMake 3.30+
+if(POLICY CMP0167)
+    cmake_policy(SET CMP0167 OLD)
+endif()
+
 find_package(Threads)
 
 # Get git commit information
