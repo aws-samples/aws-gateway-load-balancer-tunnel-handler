@@ -2,6 +2,91 @@
 
 This document tracks significant architectural changes to the Gateway Load Balancer Tunnel Handler (gwlbtun).
 
+## 2025-12-04: Added Aggregate Statistics Summary to Health Check JSON Output
+
+### Change Type
+Feature - Observability Enhancement
+
+### Files Modified
+- `GeneveHandler.cpp`
+
+### Change Description
+Enhanced the `GeneveHandlerHealthCheck::output_json()` method to include a top-level `summary` section with aggregate statistics across all UDP receiver threads and ENI handlers. This provides a quick overview of system throughput without requiring manual aggregation of per-thread and per-ENI metrics.
+
+### Architectural Impact Summary
+
+**High-Level Changes**:
+- Added `summary` object to JSON health check output
+- Aggregates packet/byte counters from all UDP receiver threads
+- Aggregates packet/byte counters from all ENI handlers
+- Includes total ENI count for quick reference
+
+**New JSON Structure**:
+```json
+{
+  "summary": {
+    "totalPktsIn": 123456789,
+    "totalBytesIn": 98765432100,
+    "totalPktsOut": 123456000,
+    "totalBytesOut": 98765000000,
+    "eniCount": 5
+  },
+  "udp": { ... },
+  "enis": [ ... ]
+}
+```
+
+**Metrics Explained**:
+| Field | Source | Description |
+|-------|--------|-------------|
+| `totalPktsIn` | UDP receiver threads | Total packets received from GWLB |
+| `totalBytesIn` | UDP receiver threads | Total bytes received from GWLB |
+| `totalPktsOut` | ENI handlers | Total packets written to OS (decapsulated) |
+| `totalBytesOut` | ENI handlers | Total bytes written to OS (decapsulated) |
+| `eniCount` | ENI handler count | Number of active ENI handlers |
+
+### Components Affected
+
+| Component | Impact | Details |
+|-----------|--------|---------|
+| GeneveHandlerHealthCheck::output_json() | Modified | Added summary aggregation logic |
+| Health check consumers | Enhanced | Can now read aggregate stats directly |
+| Monitoring integrations | Improved | Simplified metric collection |
+
+### Use Cases
+
+1. **Quick Throughput Assessment**: Get total packets/bytes without parsing per-thread arrays
+2. **Monitoring Dashboards**: Single metrics for total throughput graphs
+3. **Alerting**: Set thresholds on aggregate counters
+4. **Capacity Planning**: Track total traffic volume over time
+
+### Migration Notes
+- No breaking changes - existing JSON fields preserved
+- New `summary` field added at top level
+- Existing monitoring scripts continue to work
+- New scripts can leverage summary for simpler queries
+
+### Example Usage
+
+```bash
+# Get aggregate stats via health check endpoint
+curl -s http://localhost:8080/health | jq '.summary'
+
+# Output:
+# {
+#   "totalPktsIn": 123456789,
+#   "totalBytesIn": 98765432100,
+#   "totalPktsOut": 123456000,
+#   "totalBytesOut": 98765000000,
+#   "eniCount": 5
+# }
+```
+
+### Related Documentation
+- [UDP_BATCH_PROCESSING.md](./UDP_BATCH_PROCESSING.md) - Per-thread statistics details
+
+---
+
 ## 2025-12-04: Increased MAX_THREADS from 128 to 256
 
 ### Change Type

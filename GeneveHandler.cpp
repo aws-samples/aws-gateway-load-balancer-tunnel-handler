@@ -98,7 +98,40 @@ json GeneveHandlerHealthCheck::output_json()
 {
     json ret;
 
-    ret = { {"udp", udp.output_json()}, {"enis", json::array()} };
+    // Calculate aggregate totals
+    uint64_t totalPktsIn = 0, totalBytesIn = 0;
+    uint64_t totalPktsOut = 0, totalBytesOut = 0;
+    
+    // Sum UDP receiver stats (packets in)
+    auto udpJson = udp.output_json();
+    if(udpJson.contains("UDPPacketReceiver") && udpJson["UDPPacketReceiver"].contains("threads"))
+    {
+        for(auto& thread : udpJson["UDPPacketReceiver"]["threads"])
+        {
+            if(thread.contains("pktsIn")) totalPktsIn += thread["pktsIn"].get<uint64_t>();
+            if(thread.contains("bytesIn")) totalBytesIn += thread["bytesIn"].get<uint64_t>();
+        }
+    }
+    
+    // Sum ENI stats (packets out to OS)
+    for(auto &eni : enis)
+    {
+        auto eniJson = eni.output_json();
+        if(eniJson.contains("pktsOut")) totalPktsOut += eniJson["pktsOut"].get<uint64_t>();
+        if(eniJson.contains("bytesOut")) totalBytesOut += eniJson["bytesOut"].get<uint64_t>();
+    }
+
+    ret = { 
+        {"summary", {
+            {"totalPktsIn", totalPktsIn},
+            {"totalBytesIn", totalBytesIn},
+            {"totalPktsOut", totalPktsOut},
+            {"totalBytesOut", totalBytesOut},
+            {"eniCount", enis.size()}
+        }},
+        {"udp", udpJson}, 
+        {"enis", json::array()} 
+    };
 
     for(auto &eni : enis)
         ret["enis"].push_back(eni.output_json());
