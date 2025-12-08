@@ -31,11 +31,11 @@ public:
 
     // Elements are arranged so that when doing sorting/searching, we get entropy early. This gives a slight
     // improvement to the lookup time.
+    GeneveHeader header;   // Copy of the Geneve header to put back on packets
     struct in_addr srcAddr;
     struct in_addr dstAddr;
     uint16_t srcPort;
     uint16_t dstPort;
-    GeneveHeader header;   // Copy of the Geneve header to put back on packets
 
     std::string text();
 };

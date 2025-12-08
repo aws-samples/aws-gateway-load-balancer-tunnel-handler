@@ -42,7 +42,7 @@ GwlbData::GwlbData() {}
  * @param dstPort Destination port of the GENEVE packet
  */
 GwlbData::GwlbData(GeneveHeader header, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort) :
-       srcAddr(*srcAddr), dstAddr(*dstAddr), srcPort(srcPort), dstPort(dstPort),  header(std::move(header))
+       header(std::move(header)), srcAddr(*srcAddr), dstAddr(*dstAddr), srcPort(srcPort), dstPort(dstPort)
 {
 }
 
