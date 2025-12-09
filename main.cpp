@@ -318,6 +318,14 @@ int main(int argc, char *argv[])
             exit(EXIT_FAILURE);
         }
 
+        // Disable IPV6_V6ONLY to allow IPv4 connections on the IPv6 socket (dual-stack)
+        // This is required on RHEL 10+ where IPV6_V6ONLY defaults to 1
+        int v6only = 0;
+        if(setsockopt(healthSocket, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) < 0)
+        {
+            LOG(LS_CORE, LL_IMPORTANT, "Warning: Could not disable IPV6_V6ONLY, IPv4 health checks may not work: "s + std::strerror(errno));
+        }
+
         struct sockaddr_in6 addr;
         bzero(&addr, sizeof(addr));
 
@@ -330,6 +338,7 @@ int main(int argc, char *argv[])
             exit(EXIT_FAILURE);
         }
         listen(healthSocket, 3);
+        LOG(LS_CORE, LL_IMPORTANT, "Health check listening on port %d (IPv4 and IPv6)", healthCheck);
     }
 
     signal(SIGINT, shutdownHandler);
