@@ -1,6 +1,7 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: MIT-0
-
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. This material is AWS Content under the AWS Enterprise Agreement 
+ * or AWS Customer Agreement (as applicable) and is provided under the AWS Intellectual Property License.
+ */
 #ifndef GWAPPLIANCE_UDPPACKETRECEIVER_H
 #define GWAPPLIANCE_UDPPACKETRECEIVER_H
 
@@ -32,7 +33,7 @@ public:
     UDPPacketReceiverThread();
     ~UDPPacketReceiverThread();
 
-    void setup(int threadNumberParam, int coreNumberParam, uint16_t portNumberParam, udpCallback recvDispatcherParam);
+    void setup(int threadNumberParam, int coreNumberParam, uint16_t portNumberParam, udpCallback recvDispatcherParam, int rcvBufSizeMB);
     bool healthCheck();
     UDPPacketReceiverThreadHealthCheck status();
     void shutdown();
@@ -68,7 +69,7 @@ public:
     UDPPacketReceiver();
     ~UDPPacketReceiver();
 
-    void setup(ThreadConfig threadConfig, uint16_t portNumberParam, udpCallback recvDispatcherParam);
+    void setup(ThreadConfig threadConfig, uint16_t portNumberParam, udpCallback recvDispatcherParam, int rcvBufSizeMB = 128);
     bool healthCheck();
     UDPPacketReceiverHealthCheck status();
     void shutdown();

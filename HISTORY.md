@@ -1,3 +1,9 @@
+## Current Development Branch (v3.1):
+- Performance improvements to /dev/net/tun handling, packet manipulation, and memory usage. The improvements help more on higher CPU core counts - at 4 cores, the improvements result in approximately 4.3% improvement as measured by packets per second, but at 32 cores it's 37.2% more.
+- Clean up /dev/net/tun fd handling to reduce file descriptor count
+- Improved flow cookie tracker hashing algorithm to reduce collisions in high cps, low entropy scenarios.
+- Several bug fixes (rare crash on startup, rare FD leaks on error paths)
+
 ## 2024.09.01 Release (v3.0):
 - Support GWLB variable timeouts for the flow cache.
 

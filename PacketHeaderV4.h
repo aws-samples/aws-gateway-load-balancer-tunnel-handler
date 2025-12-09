@@ -1,9 +1,7 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: MIT-0
-//
-// Quick class to generate hashes of IPv4 packets for use in std::unordered_map
-//
-
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. This material is AWS Content under the AWS Enterprise Agreement 
+ * or AWS Customer Agreement (as applicable) and is provided under the AWS Intellectual Property License.
+ */
 #ifndef GWLBTUN_PACKETHEADERV4_H
 #define GWLBTUN_PACKETHEADERV4_H
 
@@ -16,7 +14,7 @@
 
 class PacketHeaderV4 {
 public:
-    PacketHeaderV4(unsigned char *pktbuf, ssize_t pktlen);   // pktbuf points to the start of the IP header.
+    PacketHeaderV4(unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));   // pktbuf points to the start of the IP header.
     std::string text() const;
 
     /**
@@ -55,7 +53,7 @@ private:
 
 std::ostream &operator<<(std::ostream &os, PacketHeaderV4 const &m);
 
-template<> struct std::hash<PacketHeaderV4>:unary_function<PacketHeaderV4, size_t> { 
+template<> struct std::hash<PacketHeaderV4> {
     std::size_t operator()(const PacketHeaderV4& t) const
     {
         return t.hash();
