@@ -1,7 +1,11 @@
-/*
- * Copyright Amazon.com, Inc. or its affiliates. This material is AWS Content under the AWS Enterprise Agreement 
- * or AWS Customer Agreement (as applicable) and is provided under the AWS Intellectual Property License.
- */
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
 /****************************************************************************\
  * Note on documentation: The source files contain links to the online      *
  * documentation of the public API at https://output_json.nlohmann.me. This URL    *
