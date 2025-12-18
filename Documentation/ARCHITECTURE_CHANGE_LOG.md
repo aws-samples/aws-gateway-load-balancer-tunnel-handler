@@ -2,6 +2,76 @@
 
 This document tracks significant architectural changes to the Gateway Load Balancer Tunnel Handler (gwlbtun).
 
+## 2025-12-18: Increased GWLB_MTU from 8500 to 8596 bytes
+
+### Change Type
+Configuration - MTU Optimization
+
+### Files Modified
+- `GeneveHandler.cpp` (line 23)
+
+### Change Description
+Increased the `GWLB_MTU` preprocessor constant from 8500 to 8596 bytes. This value defines the maximum transmission unit (MTU) for customer payload packets that can be processed through the GWLB tunnel handler.
+
+### Architectural Impact Summary
+
+**High-Level Changes**:
+- TUN interface MTU increased from 8500 to 8596 bytes
+- Allows processing of larger customer payload packets
+- Aligns with GWLB's maximum supported encapsulated payload size
+
+**MTU Calculation Context**:
+```
+GWLB Geneve Encapsulation Overhead:
+- Outer IP header:     20 bytes
+- Outer UDP header:     8 bytes  
+- Geneve header:       8 bytes (base)
+- Geneve options:      ~12-24 bytes (GWLB-specific TLVs)
+- Total overhead:      ~48-60 bytes
+
+With 9001 byte jumbo frame MTU:
+- 9001 - ~60 = ~8941 bytes max inner payload (theoretical)
+- 8596 bytes provides safe margin for all Geneve option combinations
+```
+
+**Performance Impact**:
+- ✅ Supports larger customer packets without fragmentation
+- ✅ Better alignment with jumbo frame environments
+- ✅ Reduced fragmentation overhead for large packet workloads
+- ⚠️ Requires network path to support jumbo frames (MTU 9001)
+
+### Components Affected
+
+| Component | Impact | Details |
+|-----------|--------|---------|
+| TunInterface (gwi-*) | MTU increased | Created with 8596 byte MTU |
+| TunInterface (gwo-*) | MTU increased | Created with 8596 byte MTU (if NO_RETURN_TRAFFIC disabled) |
+| Packet processing | Unchanged | Buffer sizes already accommodate larger packets |
+| genevePktBuffer | Unchanged | 16000 byte buffer sufficient |
+
+### Migration Notes
+- No configuration changes required
+- Existing deployments will use new MTU after recompilation
+- Network infrastructure must support jumbo frames for full benefit
+- EC2 instances in same VPC support 9001 byte MTU by default
+
+### Network Requirements
+```bash
+# Verify jumbo frame support on EC2 instance
+ip link show eth0 | grep mtu
+# Should show: mtu 9001
+
+# Verify TUN interface MTU after gwlbtun starts
+ip link show gwi-<X> | grep mtu
+# Should show: mtu 8596
+```
+
+### Related Documentation
+- [DEPLOYMENT_GUIDE_50GBPS.md](./DEPLOYMENT_GUIDE_50GBPS.md) - Network configuration
+- [PERFORMANCE_OPTIMIZATIONS.md](./PERFORMANCE_OPTIMIZATIONS.md) - Performance tuning
+
+---
+
 ## 2025-12-04: Added Aggregate Statistics Summary to Health Check JSON Output
 
 ### Change Type
