@@ -1,7 +1,6 @@
-/*
- * Copyright Amazon.com, Inc. or its affiliates. This material is AWS Content under the AWS Enterprise Agreement 
- * or AWS Customer Agreement (as applicable) and is provided under the AWS Intellectual Property License.
- */
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: MIT-0
+
 // GWLB Tunnel Handling user-space program. See the README.md for details on usage.
 
 #include <iostream>
