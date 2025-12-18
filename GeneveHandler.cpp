@@ -20,7 +20,7 @@
 
 using namespace std::string_literals;
 
-#define GWLB_MTU           8596         // MTU of customer payload packets that can be processed
+#define GWLB_MTU           8500         // MTU of inner/decapsulated packets (TUN interface)
 #define GENEVE_PORT        6081         // UDP port number that GENEVE uses by standard
 
 // Define the thread-local cache declared in the header
