@@ -10,18 +10,20 @@
 
 using namespace std::string_literals;
 
-static const std::array<std::string, 6> loggingSections = {
-        "core"s, "udp"s, "geneve"s, "tunnel"s, "healthcheck"s, "all"s
+static const std::array<std::string, LS_COUNT + 1> loggingSections = {
+        "core"s, "udp"s, "geneve"s, "tunnel"s, "healthcheck"s, "os"s, "all"s
 };
 
-static const std::array<std::string, 5> loggingLevels = {
+static const std::array<std::string, LL_COUNT> loggingLevels = {
         "critical"s, "important"s, "info"s, "debug"s, "debugdetail"s
 };
 
 Logger::Logger(std::string loggingOptions) :
-    cfg(optionsParse(loggingOptions)), shouldTerminate(false), thread(&Logger::threadFunc, this)
+    cfg(optionsParse(loggingOptions)), shouldTerminate(false), thread(&Logger::threadFunc, this), thread_ready(false)
 {
-
+    // Wait for the logging thread to be ready before returning
+    std::unique_lock<std::mutex> lock(startup_mutex);
+    startup_condvar.wait(lock, [this]{ return thread_ready; });
 }
 
 Logger::~Logger()
@@ -97,12 +99,21 @@ void Logger::threadFunc()
     struct LoggingMessage lm;
 
     pthread_setname_np(pthread_self(), "gwlbtun Logger");
+    
     std::stringstream ss;
     ss << "Logging thread started. Configuration:";
     for(auto i = LS_CORE; i < LS_COUNT; i = LogSection(i+1))
         ss << loggingSections[i] << "=" << loggingLevels[cfg.ll[i]].c_str() << "  ";
 
-    LOG(LS_CORE, LL_IMPORTANT, ss.str());
+    // Use direct call instead of LOG macro here since during initialization the global it points is not valid yet.
+    this->Log(LS_CORE, LL_IMPORTANT, ss.str());
+
+    // Signal that the thread is ready
+    {
+        std::lock_guard<std::mutex> lock(startup_mutex);
+        thread_ready = true;
+    }
+    startup_condvar.notify_one();
 
     while(!shouldTerminate)
     {
@@ -127,6 +138,8 @@ void Logger::threadFunc()
 
         queue_condvar.wait(lk);
     }
+
+    fflush(stdout);
 }
 
 /**
@@ -185,7 +198,7 @@ void Logger::LogHexDump(LogSection ls, LogLevel ll, const void *buffer, std::siz
                 bzero(hexBuf, 140);
                 bzero(printBuf, 36);
                 if(showPrintableChars) strcpy(printBuf, " | ");
-                snprintf(hexBuf, 7, "%04zx: ", offset);
+                snprintf(hexBuf, 7, "%04zx: ", offset & 0xFFFF);
             }
             snprintf(&hexBuf[5+((offset % 32)*3)], 4, " %02x", cBuffer[offset]);
             if(showPrintableChars)

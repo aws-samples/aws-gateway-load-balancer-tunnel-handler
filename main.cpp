@@ -73,6 +73,7 @@ void performHealthCheck(bool details, GeneveHandler *gh, int s, bool json)
 
     responseStream << "HTTP/1.1 " << (gh->healthy ? "200 OK" : "503 Service Unavailable") << "\r\n"
                    << "Cache-Control: max-age=0, no-cache\r\n"
+                   << "Connection: close\r\n"
                    << "Content-Type: " << (json ? "application/json" : "text/html") << "\r\n";
 
     if (details) {
@@ -85,7 +86,28 @@ void performHealthCheck(bool details, GeneveHandler *gh, int s, bool json)
     }
 
     std::string response = responseStream.str();
-    send(s, response.c_str(), response.length(), 0);
+
+    // Send all data
+    size_t total_sent = 0;
+    while(total_sent < response.length()) {
+        ssize_t sent = send(s, response.c_str() + total_sent, response.length() - total_sent, 0);
+        if(sent < 0) {
+            if(errno == EINTR) continue;
+            LOG(LS_HEALTHCHECK, LL_IMPORTANT, "Send failed: " + std::string(strerror(errno)));
+            break;
+        }
+        total_sent += sent;
+    }
+
+    // Make sure we've discarded any data coming in
+    char buffer[128];
+    ssize_t bytes_read;
+    while ((bytes_read = recv(s, buffer, sizeof(buffer), 0)) > 0) {
+        // Process received data if necessary
+    }
+
+    // Graceful shutdown: send FIN
+    shutdown(s, SHUT_WR);
 }
 
 /**
@@ -107,7 +129,8 @@ int numCores()
 void printHelp(char *progname)
 {
     fprintf(stderr,
-            "AWS Gateway Load Balancer Tunnel Handler v%d.%d\n"
+            "AWS Gateway Load Balancer Tunnel Handler v%d.%d (%s)\n"
+            "Built: %s\n"
             "Usage: %s [options]\n"
             "Example: %s\n"
             "\n"
@@ -127,17 +150,23 @@ void printHelp(char *progname)
             "Threading options:\n"
             "  --udpthreads NUM         Generate NUM threads for the UDP receiver.\n"
             "  --udpaffinity AFFIN      Generate threads for the UDP receiver, pinned to the cores listed. Takes precedence over udptreads.\n"
+#ifndef NO_RETURN_TRAFFIC
             "  --tunthreads NUM         Generate NUM threads for each tunnel processor.\n"
             "  --tunaffinity AFFIN      Generate threads for each tunnel processor, pinned to the cores listed. Takes precedence over tunthreads.\n"
+#endif
+            "\n"
+            "Performance options:\n"
+            "  --rcvbuf SIZE            Socket receive buffer size in megabytes. Default is 128MB.\n"
+            "                           For 50+ Gbps throughput, use 128-256MB. Requires net.core.rmem_max sysctl >= SIZE*1024*1024.\n"
             "\n"
             "AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.\n"
             "It is recommended to have the same number of UDP threads as tunnel processor threads, in one-arm operation.\n"
-            "If unspecified, --udpthreads %d and --tunthreads %d will be assumed as a default, based on the number of cores present.\n"
+            "If unspecified, the thread argument(s) will assume %d as a default, based on the number of cores present.\n"
             "\n"
             "Logging options:\n"
             "  --logging CONFIG         Set the logging configuration, as described below.\n"
 #ifdef NO_RETURN_TRAFFIC
-            "This version of GWLBTun has been compiled with NO_RETURN_TRAFFIC defined.\n"
+            "\nThis version of GWLBTun has been compiled with NO_RETURN_TRAFFIC defined.\n"
 #endif
             "---------------------------------------------------------------------------------------------------------\n"
             "Hook scripts arguments:\n"
@@ -153,8 +182,8 @@ void printHelp(char *progname)
             "The <X> in the interface name is replaced with the base 60 encoded ENI ID (to fit inside the 15 character\n"
             "device name limit).\n"
             "---------------------------------------------------------------------------------------------------------\n"
-            , VERSION_MAJOR, VERSION_MINOR, progname, progname, numCores(), numCores());
-    fprintf(stderr, logger->help().c_str());
+            , VERSION_MAJOR, VERSION_MINOR, GIT_DESCRIBE, BUILD_TIMESTAMP, progname, progname, numCores());
+    fputs(logger->help().c_str(), stderr);
 }
 
 /**
@@ -162,7 +191,7 @@ void printHelp(char *progname)
  *
  * @param sig
  */
-void shutdownHandler(int sig)
+void shutdownHandler(int)
 {
     keepRunning = 0;
 }
@@ -174,7 +203,11 @@ int main(int argc, char *argv[])
     int c;
     int healthCheck = 0, healthSocket;
     int tunnelTimeout = 0, cacheTimeout = 350;
-    int udpthreads = numCores(), tunthreads = numCores();
+    int udpthreads = numCores();
+    int rcvBufSizeMB = 128;  // Socket receive buffer size in MB (default 128MB for 50+ Gbps)
+#ifndef NO_RETURN_TRAFFIC
+    int tunthreads = numCores();
+#endif
     std::string udpaffinity, tunaffinity, logoptions;
     bool detailedHealth = true, printHelpFlag = false, jsonHealth = false;
 
@@ -188,11 +221,14 @@ int main(int argc, char *argv[])
             {"help", no_argument, NULL, '?'},
             {"udpthreads", required_argument, NULL, 0},    // optind 7
             {"udpaffinity", required_argument, NULL, 0},   // optind 8
-            {"tunthreads", required_argument, NULL, 0},    // optind 9
-            {"tunaffinity", required_argument, NULL, 0},   // optind 10
-            {"logging", required_argument, NULL, 0},       // optind 11
-            {"json", no_argument, NULL, 'j'},              // optind 12
-            {"idle", required_argument, NULL, 'i'},        // optind 13
+            {"logging", required_argument, NULL, 0},       // optind 9
+            {"json", no_argument, NULL, 'j'},              // optind 10
+            {"idle", required_argument, NULL, 'i'},        // optind 11
+#ifndef NO_RETURN_TRAFFIC
+            {"tunthreads", required_argument, NULL, 0},    // optind 12
+            {"tunaffinity", required_argument, NULL, 0},   // optind 13
+#endif
+            {"rcvbuf", required_argument, NULL, 0},        // optind 14 (or 12 in NO_RETURN_TRAFFIC mode)
             {0, 0, 0, 0}
     };
 
@@ -212,14 +248,23 @@ int main(int argc, char *argv[])
                         udpaffinity = std::string(optarg);
                         break;
                     case 9:
-                        tunthreads = atoi(optarg);
-                        break;
-                    case 10:
-                        tunaffinity = std::string(optarg);
-                        break;
-                    case 11:
                         logoptions = std::string(optarg);
                         break;
+#ifndef NO_RETURN_TRAFFIC
+                    case 12:
+                        tunthreads = atoi(optarg);
+                        break;
+                    case 13:
+                        tunaffinity = std::string(optarg);
+                        break;
+                    case 14:
+                        rcvBufSizeMB = atoi(optarg);
+                        break;
+#else
+                    case 12:
+                        rcvBufSizeMB = atoi(optarg);
+                        break;
+#endif
                 }
                 break;
             case 'c':
@@ -272,6 +317,14 @@ int main(int argc, char *argv[])
             exit(EXIT_FAILURE);
         }
 
+        // Disable IPV6_V6ONLY to allow IPv4 connections on the IPv6 socket (dual-stack)
+        // This is required on RHEL 10+ where IPV6_V6ONLY defaults to 1
+        int v6only = 0;
+        if(setsockopt(healthSocket, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) < 0)
+        {
+            LOG(LS_CORE, LL_IMPORTANT, "Warning: Could not disable IPV6_V6ONLY, IPv4 health checks may not work: "s + std::strerror(errno));
+        }
+
         struct sockaddr_in6 addr;
         bzero(&addr, sizeof(addr));
 
@@ -284,21 +337,30 @@ int main(int argc, char *argv[])
             exit(EXIT_FAILURE);
         }
         listen(healthSocket, 3);
+        LOG(LS_CORE, LL_IMPORTANT, "Health check listening on port %d (IPv4 and IPv6)", healthCheck);
     }
 
     signal(SIGINT, shutdownHandler);
 
-    ThreadConfig udp, tun;
+    ThreadConfig udp;
     ParseThreadConfiguration(udpthreads, udpaffinity, &udp);
-    ParseThreadConfiguration(tunthreads, tunaffinity, &tun);
 
-    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, cacheTimeout, udp, tun);
+#ifndef NO_RETURN_TRAFFIC
+    ThreadConfig tun;
+    ParseThreadConfiguration(tunthreads, tunaffinity, &tun);
+#else
+    // In NO_RETURN_TRAFFIC mode, we only write to the TUN (via this class) and never read from it, so we need no reader threads.
+    ThreadConfig tun;
+    tun.cfg.resize(0);
+#endif
+
+    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, cacheTimeout, udp, tun, rcvBufSizeMB);
     struct timespec timeout;
     timeout.tv_sec = 1; timeout.tv_nsec = 0;
     fd_set fds;
     int ready;
     int ticksSinceCheck = 60;
-    LOG(LS_CORE, LL_IMPORTANT, "AWS Gateway Load Balancer Tunnel Handler v%d.%d started.", VERSION_MAJOR, VERSION_MINOR);
+    LOG(LS_CORE, LL_IMPORTANT, "AWS Gateway Load Balancer Tunnel Handler v%d.%d (%s) built %s", VERSION_MAJOR, VERSION_MINOR, GIT_DESCRIBE, BUILD_TIMESTAMP);
     while(keepRunning)
     {
         FD_ZERO(&fds);
@@ -316,8 +378,13 @@ int main(int argc, char *argv[])
             socklen_t fromlen = sizeof(from);
             hsClient = accept(healthSocket, (struct sockaddr *)&from, &fromlen);
             LOG(LS_HEALTHCHECK, LL_DEBUG, "Processing a health check client for " + sockaddrToName((struct sockaddr *)&from));
-            performHealthCheck(detailedHealth, gh, hsClient, jsonHealth);
-            close(hsClient);
+            try {
+                performHealthCheck(detailedHealth, gh, hsClient, jsonHealth);
+                close(hsClient);
+            } catch(...) {
+                close(hsClient);
+                throw;
+            }
             ticksSinceCheck = 60;
         }
 

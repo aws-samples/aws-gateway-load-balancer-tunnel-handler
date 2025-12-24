@@ -21,6 +21,7 @@ typedef enum {
     LS_GENEVE,       // GENEVE packet details
     LS_TUNNEL,       // Tunnel processing
     LS_HEALTHCHECK,  // Health check reporting
+    LS_OS,           // Operating system function calls
     LS_COUNT
 } LogSection;
 
@@ -73,6 +74,11 @@ private:
     std::mutex queue_mutex;
     std::condition_variable queue_condvar;
     std::queue<struct LoggingMessage> queue;
+    
+    // Thread startup synchronization
+    std::mutex startup_mutex;
+    std::condition_variable startup_condvar;
+    bool thread_ready;
 };
 
 #endif //GWLBTUN_LOGGER_H

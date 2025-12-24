@@ -21,6 +21,7 @@
 #include <exception>
 #include <iostream>
 #include <thread>
+#include <utility>
 #include "utils.h"
 #include "Logger.h"
 
@@ -43,7 +44,7 @@ TunInterface::TunInterface(std::string devname, int mtu, ThreadConfig threadConf
     int tIndex = 0;
     for(int core : threadConfig.cfg)
     {
-        threads[tIndex].setup(tIndex, core, allocateHandle(), recvDispatcherParam);
+        threads[tIndex].setup(tIndex, core, devname, recvDispatcherParam);
         tIndex ++;
     }
 
@@ -54,19 +55,25 @@ TunInterface::TunInterface(std::string devname, int mtu, ThreadConfig threadConf
     ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
 
     int dummy = socket(PF_INET, SOCK_DGRAM, 0);
-    if(ioctl(dummy, SIOCGIFFLAGS, (void *)&ifr) < 0)
+    if(ioctl(dummy, SIOCGIFFLAGS, (void *)&ifr) < 0) {
+        close(dummy);
         throw std::system_error(errno, std::generic_category(), "Unable to get device flags");
+    }
 
     ifr.ifr_flags |= IFF_UP;        // Set interface is up
     ifr.ifr_flags |= IFF_RUNNING;   // Interface is running
     ifr.ifr_flags &= ~IFF_POINTOPOINT;
-    if(ioctl(dummy, SIOCSIFFLAGS, (void *)&ifr) < 0)
+    if(ioctl(dummy, SIOCSIFFLAGS, (void *)&ifr) < 0) {
+        close(dummy);
         throw std::system_error(errno, std::generic_category(), "Unable to set device flags");
+    }
 
     // Set the MTU to the GWLB standard (8500)
     ifr.ifr_mtu = mtu;
-    if(ioctl(dummy, SIOCSIFMTU, (void *)&ifr) < 0)
+    if(ioctl(dummy, SIOCSIFMTU, (void *)&ifr) < 0) {
+        close(dummy);
         throw std::system_error(errno, std::generic_category(), "Unable to set MTU");
+    }
     close(dummy);
 }
 
@@ -106,25 +113,6 @@ void TunInterface::shutdown()
 }
 
 /**
- * Send a packet out the TUN interface. Updates internal counters as well.
- *
- * @param pkt Buffer pointing to the packet to send
- * @param pktlen Packet length
- */
-void TunInterface::writePacket(unsigned char *pkt, ssize_t pktlen)
-{
-    if(!writerHandles.visit(pthread_self(), [&](auto& targetfd) { write(targetfd.second, (void *)pkt, pktlen); }))
-    {
-        // Key wasn't found - create and send.
-        int targetfd = allocateHandle();
-        writerHandles.emplace(pthread_self(), targetfd);
-        write(targetfd, (void *)pkt, pktlen);
-    }
-    lastPacket = std::chrono::steady_clock::now();
-    pktsOut ++; bytesOut += pktlen;
-}
-
-/**
  * Human-readable status check of the module.
  *
  * @return A HealthCheck class
@@ -144,7 +132,7 @@ TunInterfaceHealthCheck TunInterface::status()
  */
 std::chrono::steady_clock::time_point TunInterface::lastPacketTime()
 {
-    std::chrono::steady_clock::time_point ret;
+    std::chrono::steady_clock::time_point ret = lastPacket.load();
 
     for(auto &t : threads)
     {
@@ -190,12 +178,12 @@ TunInterfaceThread::~TunInterfaceThread() noexcept
  * @param fd
  * @param recvDispatcher
  */
-void TunInterfaceThread::setup(int threadNumberParam, int coreNumberParam, int fdParam, tunCallback recvDispatcherParam)
+void TunInterfaceThread::setup(int threadNumberParam, int coreNumberParam, std::string devname, tunCallback recvDispatcherParam)
 {
     threadNumber = threadNumberParam;
     coreNumber = coreNumberParam;
-    recvDispatcher = recvDispatcherParam;
-    fd = fdParam;
+    recvDispatcher = std::move(recvDispatcherParam);
+    tunSocket.connect(std::move(devname));
     setupCalled = true;
     thread = std::async(&TunInterfaceThread::threadFunction, this);
 }
@@ -235,6 +223,7 @@ int TunInterfaceThread::threadFunction()
 
     // Receive packets and dispatch them. Additionally, ensure a check at least every second to make sure a
     // shutdown hasn't been requested.
+    int fd = tunSocket.get();
     ssize_t msgLen;
     struct timeval tv;
     fd_set readfds;
@@ -296,38 +285,6 @@ std::chrono::steady_clock::time_point TunInterfaceThread::lastPacketTime()
     return lastPacket.load();
 }
 
-/*
- * Allocate a new fd for our tun device. May throw exceptions.
- *
- * @return The new file descriptor.
- */
-int TunInterface::allocateHandle()
-{
-    int fd;
-
-    // Set up a new multiqueue file handler to process our packets
-    struct ifreq ifr;
-    bzero(&ifr, sizeof(ifr));
-
-    // Code adapted from Linux Documentation/networking/tuntap.txt to create the tun device.
-    if((fd = open("/dev/net/tun", O_RDWR)) < 0)
-    {
-        LOG(LS_TUNNEL, LL_CRITICAL, "Unable to open /dev/net/tun "s + std::error_code{errno, std::generic_category()}.message());
-        throw std::system_error(errno, std::generic_category(), "Unable to open /dev/net/tun");
-    }
-
-    ifr.ifr_flags = IFF_TUN | IFF_NO_PI | IFF_MULTI_QUEUE;
-    strncpy(ifr.ifr_name, devname.c_str(), IFNAMSIZ);
-
-    if(ioctl(fd, TUNSETIFF, (void *)&ifr) < 0)
-    {
-        LOG(LS_TUNNEL, LL_CRITICAL, "Unable to create TUN device " + devname + " (does this process have CAP_NET_ADMIN capability?) " + std::error_code{errno, std::generic_category()}.message());
-        throw std::system_error(errno, std::generic_category(), "Unable to create TUN device (does this process have CAP_NET_ADMIN capability?)");
-    }
-
-    return fd;
-}
-
 TunInterfaceThreadHealthCheck::TunInterfaceThreadHealthCheck(bool threadValid, bool healthy, int threadNumber,
                                                              int threadId, uint64_t pktsIn, uint64_t bytesIn,
                                                              std::chrono::steady_clock::time_point lastPacket) :
@@ -368,9 +325,6 @@ std::string TunInterfaceHealthCheck::output_str()
 
     ret += "Interface "s + devname + ":\n"s;
 
-    ret += std::to_string(pktsOut) + " packets out to OS, "s + std::to_string(bytesOut) + " bytes out to OS, "s;
-    ret += timepointDeltaString(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n";
-
     for(auto &t : thcs)
     {
         ret += t.output_str();
@@ -385,8 +339,9 @@ json TunInterfaceHealthCheck::output_json()
 {
     json ret;
 
-    ret = { {"devname", devname}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"secsSincelastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacket)} ,
-            {"threads", json::array()} };
+    //ret = { {"devname", devname}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"secsSincelastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacket)} ,
+    //        {"threads", json::array()} };
+    ret = { {"devname", devname}, {"threads", json::array()} };
 
     for(auto &t : thcs)
     {
@@ -396,4 +351,87 @@ json TunInterfaceHealthCheck::output_json()
     }
 
     return ret;
+}
+
+/**
+* TunSocket implementations - RAII wrapper for TUN file descriptors
+*/
+
+TunSocket::TunSocket(int fdParam) : fd(fdParam) {}
+
+TunSocket::TunSocket() : fd(-1) {}
+
+void TunSocket::connect(const std::string devname)
+{
+    LOG(LS_OS, LL_DEBUG, "Opening TUN device for dev "s + devname + " and thread ID "s + ts(gettid()));
+    if(fd >= 0) {
+        LOG(LS_OS, LL_DEBUG, "Closing existing TUN fd "s + ts(fd) + " for dev "s + this->devname + " before opening new one for thread ID "s + ts(gettid()));
+        close(fd);
+    }
+
+    this->devname = devname;
+
+    if((fd = open("/dev/net/tun", O_RDWR)) < 0)
+    {
+        LOG(LS_OS, LL_CRITICAL, "Unable to open /dev/net/tun: "s + std::error_code{errno, std::generic_category()}.message());
+        throw std::system_error(errno, std::generic_category(), "Unable to open /dev/net/tun");
+    }
+
+    // Set up a new multiqueue file handler to process our packets
+    struct ifreq ifr;
+    bzero(&ifr, sizeof(ifr));
+
+    // Code adapted from Linux Documentation/networking/tuntap.txt to create the tun device.
+    ifr.ifr_flags = IFF_TUN | IFF_NO_PI | IFF_MULTI_QUEUE;
+    strncpy(ifr.ifr_name, devname.c_str(), IFNAMSIZ);
+
+    if(ioctl(fd, TUNSETIFF, (void *)&ifr) < 0)
+    {
+        close(fd);
+        fd = -1;
+        LOG(LS_OS, LL_CRITICAL, "Unable to create TUN device " + devname + " (does this process have CAP_NET_ADMIN capability?) " + std::error_code{errno, std::generic_category()}.message());
+        throw std::system_error(errno, std::generic_category(), "Unable to create TUN device (does this process have CAP_NET_ADMIN capability?)");
+    }
+}
+
+TunSocket::TunSocket(const std::string devname) : fd(-1)
+{
+    this->connect(devname);
+}
+
+TunSocket::~TunSocket()
+{
+    if(fd >= 0) {
+        LOG(LS_OS, LL_DEBUG, "Destroying TUN socket for devname "s + devname + " for thread ID "s + ts(gettid()));
+        close(fd);
+    }
+}
+
+TunSocket::TunSocket(TunSocket&& other) noexcept : fd(other.fd)
+{
+    other.fd = -1;
+}
+
+TunSocket& TunSocket::operator=(TunSocket&& other) noexcept
+{
+    if (this != &other)
+    {
+        if(fd >= 0)
+            close(fd);
+
+        fd = other.fd;
+        devname = other.devname;
+        other.fd = -1;
+    }
+    return *this;
+}
+
+int TunSocket::get() const
+{
+    return fd;
+}
+
+ssize_t TunSocket::write(const void *buf, size_t len) const
+{
+    return ::write(fd, buf, len);
 }

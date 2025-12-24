@@ -20,7 +20,7 @@
 
 using namespace std::string_literals;
 
-#define GWLB_MTU           8500         // MTU of customer payload packets that can be processed
+#define GWLB_MTU           8500         // MTU of inner/decapsulated packets (TUN interface)
 #define GENEVE_PORT        6081         // UDP port number that GENEVE uses by standard
 
 // Define the thread-local cache declared in the header
@@ -41,7 +41,7 @@ GwlbData::GwlbData() {}
  * @param dstPort Destination port of the GENEVE packet
  */
 GwlbData::GwlbData(GeneveHeader header, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort) :
-        header(std::move(header)), srcAddr(*srcAddr), dstAddr(*dstAddr), srcPort(srcPort), dstPort(dstPort)
+       header(std::move(header)), srcAddr(*srcAddr), dstAddr(*dstAddr), srcPort(srcPort), dstPort(dstPort)
 {
 }
 
@@ -58,14 +58,18 @@ std::string GwlbData::text()
  * @param createCallback Function to call when a new endpoint is seen.
  * @param destroyCallback Function to call when an endpoint has gone away and we need to clean up.
  * @param destroyTimeout How long to wait for an endpoint to be idle before calling destroyCallback.
+ * @param cacheTimeout Timeout for flow cache entries.
+ * @param udpThreads Thread configuration for UDP receiver threads.
+ * @param tunThreads Thread configuration for TUN interface threads.
+ * @param rcvBufSizeMB Socket receive buffer size in megabytes (default 128MB).
  */
-GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads)
+GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB)
         : healthy(true),
           createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)), eniDestroyTimeout(destroyTimeout), cacheTimeout(cacheTimeout),
           tunThreadConfig(std::move(tunThreads))
 {
     // Set up UDP receiver threads.
-    udpRcvr.setup(udpThreads, GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6));
+    udpRcvr.setup(udpThreads, GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6), rcvBufSizeMB);
 }
 
 /**
@@ -93,7 +97,40 @@ json GeneveHandlerHealthCheck::output_json()
 {
     json ret;
 
-    ret = { {"udp", udp.output_json()}, {"enis", json::array()} };
+    // Calculate aggregate totals
+    uint64_t totalPktsIn = 0, totalBytesIn = 0;
+    uint64_t totalPktsOut = 0, totalBytesOut = 0;
+    
+    // Sum UDP receiver stats (packets in)
+    auto udpJson = udp.output_json();
+    if(udpJson.contains("UDPPacketReceiver") && udpJson["UDPPacketReceiver"].contains("threads"))
+    {
+        for(auto& thread : udpJson["UDPPacketReceiver"]["threads"])
+        {
+            if(thread.contains("pktsIn")) totalPktsIn += thread["pktsIn"].get<uint64_t>();
+            if(thread.contains("bytesIn")) totalBytesIn += thread["bytesIn"].get<uint64_t>();
+        }
+    }
+    
+    // Sum ENI stats (packets out to OS)
+    for(auto &eni : enis)
+    {
+        auto eniJson = eni.output_json();
+        if(eniJson.contains("pktsOut")) totalPktsOut += eniJson["pktsOut"].get<uint64_t>();
+        if(eniJson.contains("bytesOut")) totalBytesOut += eniJson["bytesOut"].get<uint64_t>();
+    }
+
+    ret = { 
+        {"summary", {
+            {"totalPktsIn", totalPktsIn},
+            {"totalBytesIn", totalBytesIn},
+            {"totalPktsOut", totalPktsOut},
+            {"totalBytesOut", totalBytesOut},
+            {"eniCount", enis.size()}
+        }},
+        {"udp", udpJson}, 
+        {"enis", json::array()} 
+    };
 
     for(auto &eni : enis)
         ret["enis"].push_back(eni.output_json());
@@ -201,6 +238,9 @@ GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& 
 #else
     devOutName("none"s),
 #endif
+        gwiWriter(devname_make(eni, true)),
+        lastPacketOut(std::chrono::steady_clock::now()),
+        sendingSock(-1),
         createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback))
 {
     // Set up a socket we use for sending traffic out for ENI.
@@ -211,11 +251,22 @@ GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& 
     if(sendingSock == -1)
         throw std::runtime_error("Unable to allocate a socket for sending UDP traffic.");
 #endif
-    this->createCallback(devInName, devOutName, this->eni);
+    try {
+        this->createCallback(devInName, devOutName, this->eni);
+    } catch(...) {
+#ifndef NO_RETURN_TRAFFIC
+        close(sendingSock);
+#endif
+        throw;
+    }
 }
 
 GeneveHandlerENI::~GeneveHandlerENI()
 {
+#ifndef NO_RETURN_TRAFFIC
+    if(sendingSock != -1)
+        close(sendingSock);
+#endif
     this->destroyCallback(devInName, devOutName, this->eni);
 }
 
@@ -228,6 +279,8 @@ GeneveHandlerENI::~GeneveHandlerENI()
  * @param pkt The packet received.
  * @param pktlen Length of packet received.
  */
+thread_local unsigned char genevePktBuffer[16000];
+
 void GeneveHandlerENI::tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen)
 {
     LOG(LS_TUNNEL, LL_DEBUG, "Received a packet of " + ts(pktlen) + " bytes for ENI Id:" + eniStr);
@@ -282,17 +335,15 @@ void GeneveHandlerENI::tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen
             }
         }
 
-        auto headerLen = gd.header.size();
-        // Build the packet to send back to GWLB.
-        // Following as per https://aws.amazon.com/blogs/networking-and-content-delivery/integrate-your-custom-logic-or-appliance-with-aws-gateway-load-balancer/
-        unsigned char *genevePkt = new unsigned char[pktlen + headerLen];
-        // Encapsulate this packet with the original Geneve header
-        memcpy(genevePkt, &gd.header.front(), headerLen);
-        // Copy the packet in after the Geneve header.
-        memcpy(genevePkt + headerLen, pktbuf, pktlen);
-        // Swap source and destination IP addresses, but preserve ports, and send back to GWLB.
-        sendUdp(sendingSock, gd.dstAddr, gd.srcPort, gd.srcAddr, gd.dstPort, genevePkt, pktlen + headerLen);
-        delete[] genevePkt;
+        // Build scatter-gather array pointing to existing data
+        struct iovec payload[2];
+        payload[0].iov_base = (void*)&gd.header.front();  // Geneve header (already in memory)
+        payload[0].iov_len = gd.header.size();
+        payload[1].iov_base = pktbuf;                    // Original packet (already in memory)
+        payload[1].iov_len = pktlen;
+
+        // Send scatter-gather
+        sendUdpSG(sendingSock, gd.dstAddr, gd.srcPort, gd.srcAddr, gd.dstPort, payload, 2);
     } catch(std::invalid_argument& err) {
         LOG(LS_TUNNEL, LL_DEBUG, "Packet processor has a malformed packet: "s + err.what());
         return;
@@ -312,10 +363,10 @@ void GeneveHandlerENI::udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssiz
 {
     auto headerLen = gd.header.size();
     try {
-        if( (pktlen - headerLen) > (ssize_t)sizeof(struct ip) )
+        if(__builtin_expect((pktlen - headerLen) > (ssize_t)sizeof(struct ip), 1))
         {
             struct ip *iph = (struct ip *)(pkt + headerLen);
-            if(iph->ip_v == (unsigned int)4)
+            if(__builtin_expect(iph->ip_v == (unsigned int)4, 1))
             {
 #ifndef NO_RETURN_TRAFFIC
                 auto ph = PacketHeaderV4(pkt + headerLen, pktlen - headerLen);
@@ -323,15 +374,21 @@ void GeneveHandlerENI::udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssiz
                 gwlbV4Cookies.insert(std::move(ph), std::move(gd));
 #endif
                 // Route the decap'ed packet to our tun interface.
-                (*tunnelIn).writePacket(pkt + headerLen, pktlen - headerLen);
-            } else if(iph->ip_v == (unsigned int)6) {
+                gwiWriter.write(pkt + headerLen, pktlen - headerLen);
+                lastPacketOut = std::chrono::steady_clock::now();
+                pktsOut++; 
+                bytesOut += (pktlen - headerLen);                
+            } else if(__builtin_expect(iph->ip_v == (unsigned int)6, 0)) {
 #ifndef NO_RETURN_TRAFFIC
                 auto ph = PacketHeaderV6(pkt + headerLen, pktlen - headerLen);
                 // Ensure flow is in flow cache.
                 gwlbV6Cookies.insert(std::move(ph), std::move(gd));
 #endif
                 // Route the decap'ed packet to our tun interface.
-                (*tunnelIn).writePacket(pkt + headerLen, pktlen - headerLen);
+                gwiWriter.write(pkt + headerLen, pktlen - headerLen);
+                lastPacketOut = std::chrono::steady_clock::now();
+                pktsOut++; 
+                bytesOut += (pktlen - headerLen);                
             } else {
                 LOG(LS_UDP, LL_DEBUG, "Got a strange IP protocol version - "s  + ts(iph->ip_v) + " at offset " + ts(headerLen) + ". Dropping packet.");
             }
@@ -346,24 +403,26 @@ void GeneveHandlerENI::udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssiz
  * Perform a health check on this ENI, and return some information.
  * @return
  */
+GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(std::string eniStr,
+                                                         uint64_t pktsOut, uint64_t bytesOut, std::chrono::steady_clock::time_point lastPacketOut,
+                                                         TunInterfaceHealthCheck tunnelIn
 #ifndef NO_RETURN_TRAFFIC
-GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(std::string eniStr, TunInterfaceHealthCheck tunnelIn, TunInterfaceHealthCheck tunnelOut, FlowCacheHealthCheck v4FlowCache, FlowCacheHealthCheck v6FlowCache) :
-        eniStr(eniStr), tunnelIn(std::move(tunnelIn)), tunnelOut(std::move(tunnelOut)), v4FlowCache(std::move(v4FlowCache)), v6FlowCache(std::move(v6FlowCache))
-{
-}
-#else
-GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(std::string eniStr, TunInterfaceHealthCheck tunnelIn) :
-    eniStr(eniStr), tunnelIn(std::move(tunnelIn))
-{
-}
+                                                         , TunInterfaceHealthCheck tunnelOut, FlowCacheHealthCheck v4FlowCache, FlowCacheHealthCheck v6FlowCache
 #endif
+                                                         ) :
+        eniStr(eniStr), pktsOut(pktsOut), bytesOut(bytesOut), lastPacketOut(lastPacketOut), tunnelIn(std::move(tunnelIn))
+#ifndef NO_RETURN_TRAFFIC
+        , tunnelOut(std::move(tunnelOut)), v4FlowCache(std::move(v4FlowCache)), v6FlowCache(std::move(v6FlowCache))
+#endif
+{
+}
 
 std::string GeneveHandlerENIHealthCheck::output_str()
 {
     std::stringstream ret;
 
     ret << "Handler for ENI " << eniStr << std::endl;
-
+    ret << std::to_string(pktsOut) << " packets out to OS, " << std::to_string(bytesOut) << " bytes out to OS, " << timepointDeltaString(std::chrono::steady_clock::now(), lastPacketOut) + " since last packet.\n";
     ret << tunnelIn.output_str();
 #ifndef NO_RETURN_TRAFFIC
     ret << tunnelOut.output_str();
@@ -376,21 +435,20 @@ std::string GeneveHandlerENIHealthCheck::output_str()
 
 json GeneveHandlerENIHealthCheck::output_json()
 {
+    return {{"eniStr", eniStr}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"secsSinceLastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacketOut)}, {"tunnelIn", tunnelIn.output_json()}
 #ifndef NO_RETURN_TRAFFIC
-    return {{"eniStr", eniStr}, {"tunnelIn", tunnelIn.output_json()}, {"tunnelOut", tunnelOut.output_json()}, {"v4FlowCache", v4FlowCache.output_json()}, {"v6FlowCache", v6FlowCache.output_json()}};
-#else
-    return {{"eniStr", eniStr}, {"tunnelIn", tunnelIn.output_json()}};
+    , {"tunnelOut", tunnelOut.output_json()}, {"v4FlowCache", v4FlowCache.output_json()}, {"v6FlowCache", v6FlowCache.output_json()}
 #endif
-    // TODO.
+    };
 }
 
 GeneveHandlerENIHealthCheck GeneveHandlerENI::check()
 {
+    return { eniStr, pktsOut.load(), bytesOut.load(), lastPacketOut.load(), tunnelIn->status()
 #ifndef NO_RETURN_TRAFFIC
-    return { eniStr, tunnelIn->status(), tunnelOut->status(), gwlbV4Cookies.check(), gwlbV6Cookies.check()};
-#else
-    return { eniStr, tunnelIn->status() };
+             , tunnelOut->status(), gwlbV4Cookies.check(), gwlbV6Cookies.check()
 #endif
+    };
 }
 
 /**
@@ -402,8 +460,9 @@ bool GeneveHandlerENI::hasGoneIdle(int timeout)
 {
     std::chrono::steady_clock::time_point expireTime = std::chrono::steady_clock::now() - std::chrono::seconds(timeout);
 
-    if(tunnelIn->lastPacketTime() > expireTime) return false;
+    if(lastPacketOut.load() > expireTime) return false;
 #ifndef NO_RETURN_TRAFFIC
+    if(tunnelIn->lastPacketTime() > expireTime) return false;
     if(tunnelOut->lastPacketTime() > expireTime) return false;
 #endif
     return true;

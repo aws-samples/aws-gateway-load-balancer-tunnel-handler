@@ -25,41 +25,31 @@ PacketHeaderV4::PacketHeaderV4(unsigned char *pktbuf, ssize_t pktlen)
 {
     struct ip *iph = (struct ip *)pktbuf;
 
-    if(pktlen < (ssize_t)sizeof(struct ip))
+    if(__builtin_expect(pktlen < (ssize_t)sizeof(struct ip), 0))
         throw std::invalid_argument("PacketHeaderV4 provided a packet too small to be an IPv4 packet.");
 
-    if(iph->ip_v != 4)
+    if(__builtin_expect(iph->ip_v != 4, 0))
         throw std::invalid_argument("PacketHeaderV4 provided a packet that isn't IPv4.");
 
     prot = iph->ip_p;
     src = be32toh(*(uint32_t *)&iph->ip_src);
     dst = be32toh(*(uint32_t *)&iph->ip_dst);
-    switch(prot)
+    
+    // Most traffic is TCP or UDP - optimize for that
+    if(__builtin_expect(prot == IPPROTO_UDP || prot == IPPROTO_TCP, 1))
     {
-        case IPPROTO_UDP:
-        {
-            if(pktlen < (ssize_t)(sizeof(struct ip) + sizeof(struct udphdr)))
-                throw std::invalid_argument("PacketHeaderV4 provided a packet with protocol=UDP, but too small to carry UDP information.");
-            struct udphdr *udp = (struct udphdr *)(pktbuf + sizeof(struct ip));
-            srcpt = be16toh(udp->uh_sport);
-            dstpt = be16toh(udp->uh_dport);
-            break;
-        }
-        case IPPROTO_TCP:
-        {
-            if(pktlen < (ssize_t)(sizeof(struct ip) + sizeof(struct tcphdr)))
-                throw std::invalid_argument("PacketHeaderV4 provided a packet with protocol=TCP, but too small to carry UDP information.");
-            struct tcphdr *tcp = (struct tcphdr *)(pktbuf + sizeof(struct ip));
-            srcpt = be16toh(tcp->th_sport);
-            dstpt = be16toh(tcp->th_dport);
-            break;
-        }
-        default:
-        {
-            srcpt = 0;
-            dstpt = 0;
-            break;
-        }
+        if(__builtin_expect(pktlen < (ssize_t)(sizeof(struct ip) + 4), 0))
+            throw std::invalid_argument("PacketHeaderV4 provided a packet with protocol=TCP/UDP, but too small to carry port information.");
+        
+        // Ports are at same offset for both TCP and UDP
+        uint16_t *ports = (uint16_t *)(pktbuf + sizeof(struct ip));
+        srcpt = be16toh(ports[0]);
+        dstpt = be16toh(ports[1]);
+    }
+    else
+    {
+        srcpt = 0;
+        dstpt = 0;
     }
 }
 

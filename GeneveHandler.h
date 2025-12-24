@@ -16,7 +16,7 @@
 #include "PacketHeaderV6.h"
 #include "FlowCache.h"
 #include "utils.h"
-#include <net/if.h>     // Needed for IFNAMSIZ define
+#include <linux/if.h>     // Needed for IFNAMSIZ define
 #include <boost/unordered/concurrent_flat_map.hpp>
 #include "HealthCheck.h"
 
@@ -30,11 +30,11 @@ public:
 
     // Elements are arranged so that when doing sorting/searching, we get entropy early. This gives a slight
     // improvement to the lookup time.
+    GeneveHeader header;   // Copy of the Geneve header to put back on packets
     struct in_addr srcAddr;
     struct in_addr dstAddr;
     uint16_t srcPort;
     uint16_t dstPort;
-    GeneveHeader header;   // Copy of the Geneve header to put back on packets
 
     std::string text();
 };
@@ -46,16 +46,19 @@ public:
 
 class GeneveHandlerENIHealthCheck : public HealthCheck {
 public:
+    GeneveHandlerENIHealthCheck(std::string, uint64_t pktsOut, uint64_t bytesOut, std::chrono::steady_clock::time_point lastPacketOut, TunInterfaceHealthCheck
 #ifndef NO_RETURN_TRAFFIC
-    GeneveHandlerENIHealthCheck(std::string, TunInterfaceHealthCheck, TunInterfaceHealthCheck, FlowCacheHealthCheck, FlowCacheHealthCheck);
-#else
-    GeneveHandlerENIHealthCheck(std::string, TunInterfaceHealthCheck);
+                                , TunInterfaceHealthCheck, FlowCacheHealthCheck, FlowCacheHealthCheck
 #endif
+                                );
     std::string output_str() ;
     json output_json();
 
 private:
     std::string eniStr;
+    uint64_t pktsOut, bytesOut;
+    std::chrono::steady_clock::time_point lastPacketOut;
+
     TunInterfaceHealthCheck tunnelIn;
 #ifndef NO_RETURN_TRAFFIC
     TunInterfaceHealthCheck tunnelOut;
@@ -68,8 +71,8 @@ class GeneveHandlerENI {
 public:
     GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
     ~GeneveHandlerENI();
-    void udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssize_t pktlen);
-    void tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen);
+    void udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssize_t pktlen) __attribute__((hot));
+    void tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));
     GeneveHandlerENIHealthCheck check();
     bool hasGoneIdle(int timeout);
 
@@ -88,6 +91,13 @@ private:
     FlowCache<PacketHeaderV4, GwlbData> gwlbV4Cookies;
     FlowCache<PacketHeaderV6, GwlbData> gwlbV6Cookies;
 #endif
+
+    // Socket to write to our associated tunnel
+    TunSocket gwiWriter;
+    std::atomic<uint64_t> pktsOut{0}; 
+    std::atomic<uint64_t> bytesOut{0}; 
+    std::atomic<std::chrono::steady_clock::time_point> lastPacketOut;
+
     // Socket used by all threads for sending
     int sendingSock;
     const ghCallback createCallback;
@@ -119,7 +129,7 @@ private:
 
 class GeneveHandler {
 public:
-    GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads);
+    GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB = 128);
     void udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort);
     GeneveHandlerHealthCheck check();
     bool healthy;                  // Updated by check()

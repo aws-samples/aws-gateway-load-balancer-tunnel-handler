@@ -1,8 +1,5 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
-//
-// Quick class to generate hashes of IPv6 packets for use in std::unordered_map
-//
 
 #ifndef GWLBTUN_PACKETHEADERV6_H
 #define GWLBTUN_PACKETHEADERV6_H
@@ -15,7 +12,7 @@
 
 class PacketHeaderV6 {
 public:
-    PacketHeaderV6(unsigned char *pktbuf, ssize_t pktlen);   // pktbuf points to the start of the IP header.
+    PacketHeaderV6(unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));   // pktbuf points to the start of the IP header.
     
     bool operator==(const PacketHeaderV6 &ph) const
     {
@@ -52,7 +49,7 @@ private:
 
 std::ostream &operator<<(std::ostream &os, PacketHeaderV6 const &m);
 
-template<> struct std::hash<PacketHeaderV6>:unary_function<PacketHeaderV6, size_t> { 
+template<> struct std::hash<PacketHeaderV6> {
     std::size_t operator()(const PacketHeaderV6& t) const
     {
         return t.hash();

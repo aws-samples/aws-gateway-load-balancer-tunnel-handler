@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * PacketHeaderV4 class serves to interpret and provide a hashing function for an IPv6 header, looking at similiar fields
+ * PacketHeaderV6 class serves to interpret and provide a hashing function for an IPv6 header, looking at similiar fields
  * to what GWLB does when producing a flow cookie.
  */
 
@@ -29,11 +29,10 @@ PacketHeaderV6::PacketHeaderV6(unsigned char *pktbuf, ssize_t pktlen)
 {
     struct ip6_hdr *iph6 = (struct ip6_hdr *)pktbuf;
 
-    if(pktlen < (ssize_t)sizeof(struct ip6_hdr))
+    if(__builtin_expect(pktlen < (ssize_t)sizeof(struct ip6_hdr), 0))
         throw std::invalid_argument("PacketHeaderV6 provided a packet too small to be an IPv6 packet.");
 
-    if( ((iph6->ip6_ctlun.ip6_un2_vfc & 0xF0) >> 4) != 6)
-
+    if(__builtin_expect(((iph6->ip6_ctlun.ip6_un2_vfc & 0xF0) >> 4) != 6, 0))
         throw std::invalid_argument("PacketHeaderV6 provided a packet that isn't IPv6 : "s + std::to_string(iph6->ip6_ctlun.ip6_un2_vfc) + " -- "s + std::to_string(iph6->ip6_ctlun.ip6_un2_vfc >> 4) + " at offset "s + std::to_string(
                 offsetof(struct ip6_hdr, ip6_ctlun.ip6_un2_vfc)));
 
@@ -42,30 +41,22 @@ PacketHeaderV6::PacketHeaderV6(unsigned char *pktbuf, ssize_t pktlen)
     memcpy(&src, &iph6->ip6_src, sizeof(struct in6_addr));
     memcpy(&dst, &iph6->ip6_dst, sizeof(struct in6_addr));
     prot = iph6->ip6_ctlun.ip6_un1.ip6_un1_nxt;
-    switch(prot)
+    
+    // Most traffic is TCP or UDP - optimize for that
+    if(__builtin_expect(prot == IPPROTO_UDP || prot == IPPROTO_TCP, 1))
     {
-        case IPPROTO_UDP:
-        {
-            if(pktlen < (ssize_t)(sizeof(struct ip6_hdr) + sizeof(struct udphdr)))
-                throw std::invalid_argument("PacketHeaderV6 provided a packet with protocol=UDP, but too small to carry UDP information.");
-            struct udphdr *udp = (struct udphdr *)(pktbuf + sizeof(struct ip6_hdr));
-            srcpt = be16toh(udp->uh_sport);
-            dstpt = be16toh(udp->uh_dport);
-            break;
-        }
-        case IPPROTO_TCP:
-        {
-            if(pktlen < (ssize_t)(sizeof(struct ip6_hdr) + sizeof(struct tcphdr)))
-                throw std::invalid_argument("PacketHeaderV6 provided a packet with protocol=TCP, but too small to carry UDP information.");
-            struct tcphdr *tcp = (struct tcphdr *)(pktbuf + sizeof(struct ip6_hdr));
-            srcpt = be16toh(tcp->th_sport);
-            dstpt = be16toh(tcp->th_dport);
-            break;
-        }
-        default:
-            srcpt = 0;
-            dstpt = 0;
-            break;
+        if(__builtin_expect(pktlen < (ssize_t)(sizeof(struct ip6_hdr) + 4), 0))
+            throw std::invalid_argument("PacketHeaderV6 provided a packet with protocol=TCP/UDP, but too small to carry port information.");
+        
+        // Ports are at same offset for both TCP and UDP
+        uint16_t *ports = (uint16_t *)(pktbuf + sizeof(struct ip6_hdr));
+        srcpt = be16toh(ports[0]);
+        dstpt = be16toh(ports[1]);
+    }
+    else
+    {
+        srcpt = 0;
+        dstpt = 0;
     }
 }
 
