@@ -88,6 +88,30 @@ sysctl net.ipv4.ip_forward=1
 sysctl net.ipv6.conf.all.forwarding=1
 ```
 
+## Kernel XPS (Transmit Packet Steering)
+If you are using gwlbtun in a two-arm mode configuration (usually NAT'ing through it), the default Linux kernel XPS configuration has a poor interaction with the tun driver by default. While gwlbtun does use multiple TUN handlers to improve performance, Linux will put nearly all of the NAT'ed traffic on a single transmit queue, reducing performance.
+To correct this, add commands similar to the following to your instance (or as part of the init script from gwlbtun):
+```
+echo 1 > /sys/class/net/ens5/queues/tx-0/xps_cpus  # CPU 0
+echo 2 > /sys/class/net/ens5/queues/tx-1/xps_cpus  # CPU 1
+echo 4 > /sys/class/net/ens5/queues/tx-2/xps_cpus  # CPU 2
+echo 8 > /sys/class/net/ens5/queues/tx-3/xps_cpus  # CPU 3
+```
+Keep repeating for each CPU. This can help with getting pps_allowance_exceeded counts at lower traffic levels that don't make sense - it's pps_allowance_exceeded on a single queue. You can verify if this problem is occurring, and if it is fixed,  via ```ethtool -S ens5 | grep queue_.*_tx_cnt```:
+```
+Before XPS (bad scenario):
+    queue_0_tx_cnt:  12,751,829 pkts  (100.0%)
+    queue_1_tx_cnt:          52 pkts  (0.0%)
+    queue_2_tx_cnt:           8 pkts  (0.0%)
+    queue_3_tx_cnt:          47 pkts  (0.0%)
+
+After XPS:
+    queue_0_tx_cnt:  4,805,760 pkts  (27.4%)
+    queue_1_tx_cnt:  4,093,697 pkts  (23.3%)
+    queue_2_tx_cnt:  4,321,438 pkts  (24.6%)
+    queue_3_tx_cnt:  4,320,083 pkts  (24.6%)
+```
+
 ## Advanced usages
 
 ### No return mode
