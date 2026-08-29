@@ -34,7 +34,7 @@ using namespace std::string_literals;
  * @param recvDispatcher Function the thread should callback to on packets received.
  */
 TunInterface::TunInterface(std::string devname, int mtu, ThreadConfig threadConfig, tunCallback recvDispatcherParam)
-: lastPacket(std::chrono::steady_clock::now()),pktsOut(0),bytesOut(0)
+: lastPacket(std::chrono::steady_clock::now()),pktsOut(0),bytesOut(0),pktsDropped(0)
 {
     LOG(LS_TUNNEL, LL_DEBUG, "TunInterface creating for "s + devname);
     this->devname = devname;
@@ -54,6 +54,8 @@ TunInterface::TunInterface(std::string devname, int mtu, ThreadConfig threadConf
     ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
 
     int dummy = socket(PF_INET, SOCK_DGRAM, 0);
+    if(dummy < 0)
+        throw std::system_error(errno, std::generic_category(), "Unable to create dummy socket to configure device");
     if(ioctl(dummy, SIOCGIFFLAGS, (void *)&ifr) < 0)
         throw std::system_error(errno, std::generic_category(), "Unable to get device flags");
 
@@ -113,15 +115,28 @@ void TunInterface::shutdown()
  */
 void TunInterface::writePacket(unsigned char *pkt, ssize_t pktlen)
 {
-    if(!writerHandles.visit(pthread_self(), [&](auto& targetfd) { write(targetfd.second, (void *)pkt, pktlen); }))
+    ssize_t written = -1;
+    if(!writerHandles.visit(pthread_self(), [&](auto& targetfd) { written = write(targetfd.second, (void *)pkt, pktlen); }))
     {
         // Key wasn't found - create and send.
         int targetfd = allocateHandle();
         writerHandles.emplace(pthread_self(), targetfd);
-        write(targetfd, (void *)pkt, pktlen);
+        written = write(targetfd, (void *)pkt, pktlen);
     }
     lastPacket = std::chrono::steady_clock::now();
-    pktsOut ++; bytesOut += pktlen;
+    if(written == pktlen)
+    {
+        pktsOut ++; bytesOut += pktlen;
+    } else {
+        // A negative return is an error (e.g. EAGAIN on a full queue); a short return is a partial write.
+        // In either case the packet did not make it out intact, so account for the drop rather than silently losing it.
+        pktsDropped ++;
+        if(written < 0) {
+            LOG(LS_TUNNEL, LL_IMPORTANT, "Failed to write "s + ts(pktlen) + " byte packet to "s + devname + ": "s + std::error_code{errno, std::generic_category()}.message());
+        } else {
+            LOG(LS_TUNNEL, LL_IMPORTANT, "Partial write to "s + devname + ": only "s + ts(written) + " of "s + ts(pktlen) + " bytes written; dropping packet."s);
+        }
+    }
 }
 
 /**
@@ -135,7 +150,7 @@ TunInterfaceHealthCheck TunInterface::status()
     for(auto &t : threads)
         thcs.push_back(t.status());
 
-    return { devname, pktsOut, bytesOut, lastPacket, thcs };
+    return { devname, pktsOut, bytesOut, pktsDropped, lastPacket, thcs };
 }
 
 /**
@@ -248,6 +263,13 @@ int TunInterfaceThread::threadFunction()
         {
             // The tun interface has received packets. Drain all, dispatching each.
             msgLen = read(fd, pktbuf, 65534);   // Remember: TUN devices always return 1 and only 1 packet on read()
+            if(msgLen <= 0)
+            {
+                // A negative return is a read error; zero is a (spurious) empty read. Nothing to dispatch either way.
+                if(msgLen < 0)
+                    LOG(LS_TUNNEL, LL_DEBUG, "read() on tun device "s + ts(fd) + " failed: "s + std::error_code{errno, std::generic_category()}.message());
+                continue;
+            }
             lastPacket = std::chrono::steady_clock::now();
             try {
                 recvDispatcher(pktbuf, msgLen);
@@ -358,8 +380,8 @@ json TunInterfaceThreadHealthCheck::output_json()
              {"healthy", healthy}, {"pktsIn", pktsIn}, {"bytesIn", bytesIn}, {"secsSincelastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacket)} };
 }
 
-TunInterfaceHealthCheck::TunInterfaceHealthCheck(std::string devname, uint64_t pktsOut, uint64_t bytesOut, std::chrono::steady_clock::time_point lastPacket, std::list<TunInterfaceThreadHealthCheck> thcs) :
-        devname(devname), pktsOut(pktsOut), bytesOut(bytesOut), lastPacket(lastPacket), thcs(std::move(thcs))
+TunInterfaceHealthCheck::TunInterfaceHealthCheck(std::string devname, uint64_t pktsOut, uint64_t bytesOut, uint64_t pktsDropped, std::chrono::steady_clock::time_point lastPacket, std::list<TunInterfaceThreadHealthCheck> thcs) :
+        devname(devname), pktsOut(pktsOut), bytesOut(bytesOut), pktsDropped(pktsDropped), lastPacket(lastPacket), thcs(std::move(thcs))
 {}
 
 std::string TunInterfaceHealthCheck::output_str()
@@ -369,6 +391,7 @@ std::string TunInterfaceHealthCheck::output_str()
     ret += "Interface "s + devname + ":\n"s;
 
     ret += std::to_string(pktsOut) + " packets out to OS, "s + std::to_string(bytesOut) + " bytes out to OS, "s;
+    ret += std::to_string(pktsDropped) + " packets dropped on write, "s;
     ret += timepointDeltaString(std::chrono::steady_clock::now(), lastPacket) + " since last packet.\n";
 
     for(auto &t : thcs)
@@ -385,7 +408,7 @@ json TunInterfaceHealthCheck::output_json()
 {
     json ret;
 
-    ret = { {"devname", devname}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"secsSincelastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacket)} ,
+    ret = { {"devname", devname}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"pktsDropped", pktsDropped}, {"secsSincelastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacket)} ,
             {"threads", json::array()} };
 
     for(auto &t : thcs)

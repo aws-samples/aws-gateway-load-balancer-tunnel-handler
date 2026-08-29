@@ -99,7 +99,7 @@ bool sendUdp(int sock, struct in_addr from_addr, uint16_t from_port, struct in_a
 
     if(sendto(sock, packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen, 0, (struct sockaddr *)&to_zero_port, sizeof(to_zero_port)) < 0)
     {
-        LOG(LS_UDP, LL_IMPORTANT, "Unable to send UDP packet. Parameters were %d, %p, %d, %d, %d, %d", sock, packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen, 0, (struct sockaddr *)&to_addr, sizeof(to_addr));
+        LOG(LS_UDP, LL_IMPORTANT, "Unable to send UDP packet. Parameters were %d, %p, %zu, %d, %p, %zu", sock, (void *)packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen, 0, (void *)&to_addr, sizeof(to_addr));
         LOGHEXDUMP(LS_UDP, LL_IMPORTANT, "UDP packet buffer", packet_buffer, sizeof(struct iphdr) + sizeof(struct udphdr) + pktLen);
         return false;
     }

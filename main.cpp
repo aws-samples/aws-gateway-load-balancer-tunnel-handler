@@ -6,6 +6,7 @@
 #include <iostream>
 #include <unistd.h>
 #include <getopt.h>
+#include <sys/socket.h>
 #include "GeneveHandler.h"
 #include <cstdlib>
 #include <sstream>
@@ -85,7 +86,18 @@ void performHealthCheck(bool details, GeneveHandler *gh, int s, bool json)
     }
 
     std::string response = responseStream.str();
-    send(s, response.c_str(), response.length(), 0);
+    // send() may transmit fewer bytes than requested, so loop until the whole response is out or an error occurs.
+    size_t sent = 0;
+    while(sent < response.length())
+    {
+        ssize_t ret = send(s, response.c_str() + sent, response.length() - sent, MSG_NOSIGNAL);
+        if(ret < 0)
+        {
+            LOG(LS_HEALTHCHECK, LL_IMPORTANT, "Unable to send health check response: "s + std::strerror(errno));
+            break;
+        }
+        sent += ret;
+    }
 }
 
 /**
@@ -266,7 +278,7 @@ int main(int argc, char *argv[])
     // GWLB only supports IPv4.
     if(healthCheck > 0)
     {
-        if((healthSocket = socket(AF_INET6, SOCK_STREAM, 0)) == 0)
+        if((healthSocket = socket(AF_INET6, SOCK_STREAM, 0)) < 0)
         {
             LOG(LS_CORE, LL_CRITICAL, "Creating health check socket failed: "s + std::strerror(errno));
             exit(EXIT_FAILURE);
@@ -283,7 +295,11 @@ int main(int argc, char *argv[])
             LOG(LS_CORE, LL_CRITICAL, "Unable to listen to health status port: "s + std::strerror(errno));
             exit(EXIT_FAILURE);
         }
-        listen(healthSocket, 3);
+        if(listen(healthSocket, 3) < 0)
+        {
+            LOG(LS_CORE, LL_CRITICAL, "Unable to listen on health status port: "s + std::strerror(errno));
+            exit(EXIT_FAILURE);
+        }
     }
 
     signal(SIGINT, shutdownHandler);
@@ -315,9 +331,14 @@ int main(int argc, char *argv[])
             struct sockaddr_in6 from;
             socklen_t fromlen = sizeof(from);
             hsClient = accept(healthSocket, (struct sockaddr *)&from, &fromlen);
-            LOG(LS_HEALTHCHECK, LL_DEBUG, "Processing a health check client for " + sockaddrToName((struct sockaddr *)&from));
-            performHealthCheck(detailedHealth, gh, hsClient, jsonHealth);
-            close(hsClient);
+            if(hsClient < 0)
+            {
+                LOG(LS_HEALTHCHECK, LL_IMPORTANT, "Unable to accept health check client: "s + std::strerror(errno));
+            } else {
+                LOG(LS_HEALTHCHECK, LL_DEBUG, "Processing a health check client for " + sockaddrToName((struct sockaddr *)&from));
+                performHealthCheck(detailedHealth, gh, hsClient, jsonHealth);
+                close(hsClient);
+            }
             ticksSinceCheck = 60;
         }
 

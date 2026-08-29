@@ -57,13 +57,13 @@ private:
 
 class TunInterfaceHealthCheck : public HealthCheck {
 public:
-    TunInterfaceHealthCheck(std::string devname, uint64_t pktsOut, uint64_t bytesOut, std::chrono::steady_clock::time_point lastPacket, std::list<TunInterfaceThreadHealthCheck> thcs);
+    TunInterfaceHealthCheck(std::string devname, uint64_t pktsOut, uint64_t bytesOut, uint64_t pktsDropped, std::chrono::steady_clock::time_point lastPacket, std::list<TunInterfaceThreadHealthCheck> thcs);
     std::string output_str();
     json output_json();
 
 private:
     std::string devname;
-    uint64_t pktsOut, bytesOut;
+    uint64_t pktsOut, bytesOut, pktsDropped;
     std::chrono::steady_clock::time_point lastPacket;
     std::list<TunInterfaceThreadHealthCheck> thcs;
 };
@@ -82,7 +82,7 @@ public:
 
 private:
     std::atomic<std::chrono::steady_clock::time_point> lastPacket;
-    std::atomic<uint64_t> pktsOut, bytesOut;
+    std::atomic<uint64_t> pktsOut, bytesOut, pktsDropped;
     std::array<class TunInterfaceThread, MAX_THREADS> threads;
     boost::concurrent_flat_map<pthread_t, int> writerHandles;
     int allocateHandle();
