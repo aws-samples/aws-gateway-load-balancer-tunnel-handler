@@ -172,7 +172,7 @@ class Logger *logger;
 int main(int argc, char *argv[])
 {
     int c;
-    int healthCheck = 0, healthSocket;
+    int healthCheck = 0, healthSocket = -1;
     int tunnelTimeout = 0, cacheTimeout = 350;
     int udpthreads = numCores(), tunthreads = numCores();
     std::string udpaffinity, tunaffinity, logoptions;
