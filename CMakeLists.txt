@@ -3,7 +3,6 @@ project(gwlbtun)
 set(CMAKE_CXX_STANDARD 17)
 find_package(Threads)
 
-set(Boost_INCLUDE_DIR /home/ec2-user/boost)
 find_package(Boost 1.83 REQUIRED)
 if(Boost_FOUND)
     include_directories(${Boost_INCLUDE_DIRS})

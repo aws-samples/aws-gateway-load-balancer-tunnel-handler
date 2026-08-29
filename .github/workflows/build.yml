@@ -1,0 +1,61 @@
+name: Build (Amazon Linux 2023)
+
+# Compiles gwlbtun inside an amazonlinux:2023 container so the linked glibc
+# matches the Amazon Linux hosts this handler runs on. Builds natively for both
+# x86_64 and aarch64, and uploads each binary as a workflow artifact.
+#
+# Inspired by AndrewGuenther/fck-nat#137, adapted to build this repo directly
+# rather than cloning it from source.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      boost_version:
+        description: 'Boost release version (headers only)'
+        required: false
+        default: '1.83.0'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build gwlbtun inside an AL2023 container
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            -w /workspace \
+            -e BOOST_VERSION='${{ inputs.boost_version || '1.83.0' }}' \
+            -e TARGET_ARCH='${{ matrix.arch }}' \
+            -e WORKSPACE=/workspace \
+            amazonlinux:2023 \
+            bash .github/scripts/build-al2023.sh
+
+      - name: Verify artifact
+        run: |
+          ls -lh build/
+          test -x "build/gwlbtun"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: gwlbtun-${{ matrix.arch }}
+          path: build/gwlbtun
+          retention-days: 30
