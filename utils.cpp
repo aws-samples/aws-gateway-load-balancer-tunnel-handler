@@ -67,8 +67,16 @@ std::string stringFormat(const std::string& fmt_str, va_list ap)
  */
 bool sendUdp(int sock, struct in_addr from_addr, uint16_t from_port, struct in_addr to_addr, uint16_t to_port, unsigned char *pktBuf, ssize_t pktLen)
 {
-    // Build the IP header
-    uint8_t packet_buffer[16000];
+    // Build the IP header. The buffer is sized to the largest total length an IPv4 packet can represent (the
+    // 16-bit iphdr::tot_len field maxes out at 65535), since that's a hard ceiling regardless of buffer size.
+    static constexpr size_t packet_buffer_size = 65535;
+    static constexpr size_t max_payload = packet_buffer_size - sizeof(struct iphdr) - sizeof(struct udphdr);
+    uint8_t packet_buffer[packet_buffer_size];
+    if (pktLen < 0 || (size_t)pktLen > max_payload)
+    {
+        LOG(LS_UDP, LL_IMPORTANT, "Refusing to send UDP packet of length %zd - exceeds maximum supported payload size of %zu bytes.", pktLen, max_payload);
+        return false;
+    }
     struct iphdr *iph;
     struct udphdr *udph;
     iph = (struct iphdr *)&packet_buffer[0];
