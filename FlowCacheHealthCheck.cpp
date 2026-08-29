@@ -16,5 +16,5 @@ std::string FlowCacheHealthCheck::output_str()
 
 json FlowCacheHealthCheck::output_json()
 {
-    return {{"cacheName", cacheName}, {"size", size}, {"timedOut", timedOut}, "idleTimeoutSecs", cacheTimeout };
+    return {{"cacheName", cacheName}, {"size", size}, {"timedOut", timedOut}, {"idleTimeoutSecs", cacheTimeout}};
 }
