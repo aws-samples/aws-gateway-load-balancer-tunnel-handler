@@ -88,6 +88,7 @@ bool sendUdp(int sock, struct in_addr from_addr, uint16_t from_port, struct in_a
     udph->source = htons(from_port);
     udph->dest = htons(to_port);
     udph->len = htons(sizeof(struct udphdr) + pktLen);
+    udph->check = 0;
 
     memcpy(&packet_buffer[sizeof(struct iphdr) + sizeof(struct udphdr)], pktBuf, pktLen);
 
