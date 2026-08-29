@@ -74,6 +74,7 @@ public:
     ~TunInterface();
 
     void writePacket(unsigned char *pkt, ssize_t pktlen);
+    bool healthCheck();
     TunInterfaceHealthCheck status();
     void shutdown();
 

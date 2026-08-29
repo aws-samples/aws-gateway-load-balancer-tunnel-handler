@@ -125,6 +125,27 @@ void TunInterface::writePacket(unsigned char *pkt, ssize_t pktlen)
 }
 
 /**
+ * Check that all of our threads are still alive.
+ *
+ * @return true if every started thread is still alive, false otherwise.
+ */
+bool TunInterface::healthCheck()
+{
+    bool status = true;
+
+    for(auto &t : threads)
+    {
+        if(t.setupCalled)
+        {
+            if(!t.healthCheck())
+                status = false;
+        }
+    }
+
+    return status;
+}
+
+/**
  * Human-readable status check of the module.
  *
  * @return A HealthCheck class

@@ -114,7 +114,15 @@ GeneveHandlerHealthCheck GeneveHandler::check()
     // Check remaining handlers.
     eniHandlers.visit_all([&enis](auto& eniHandler) { enis.push_back( (*eniHandler.second.ptr).check() );  ; });
 
-    return { udpRcvr.healthCheck(), udpRcvr.status(), enis };
+    bool udpHealthy = udpRcvr.healthCheck();
+    bool enisHealthy = true;
+    for(auto &eni : enis)
+        if(!eni.isHealthy())
+            enisHealthy = false;
+
+    this->healthy = udpHealthy && enisHealthy;
+
+    return { this->healthy, udpRcvr.status(), enis };
 }
 
 /**
@@ -347,13 +355,13 @@ void GeneveHandlerENI::udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssiz
  * @return
  */
 #ifndef NO_RETURN_TRAFFIC
-GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(std::string eniStr, TunInterfaceHealthCheck tunnelIn, TunInterfaceHealthCheck tunnelOut, FlowCacheHealthCheck v4FlowCache, FlowCacheHealthCheck v6FlowCache) :
-        eniStr(eniStr), tunnelIn(std::move(tunnelIn)), tunnelOut(std::move(tunnelOut)), v4FlowCache(std::move(v4FlowCache)), v6FlowCache(std::move(v6FlowCache))
+GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(bool healthy, std::string eniStr, TunInterfaceHealthCheck tunnelIn, TunInterfaceHealthCheck tunnelOut, FlowCacheHealthCheck v4FlowCache, FlowCacheHealthCheck v6FlowCache) :
+        healthy(healthy), eniStr(eniStr), tunnelIn(std::move(tunnelIn)), tunnelOut(std::move(tunnelOut)), v4FlowCache(std::move(v4FlowCache)), v6FlowCache(std::move(v6FlowCache))
 {
 }
 #else
-GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(std::string eniStr, TunInterfaceHealthCheck tunnelIn) :
-    eniStr(eniStr), tunnelIn(std::move(tunnelIn))
+GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(bool healthy, std::string eniStr, TunInterfaceHealthCheck tunnelIn) :
+    healthy(healthy), eniStr(eniStr), tunnelIn(std::move(tunnelIn))
 {
 }
 #endif
@@ -362,7 +370,7 @@ std::string GeneveHandlerENIHealthCheck::output_str()
 {
     std::stringstream ret;
 
-    ret << "Handler for ENI " << eniStr << std::endl;
+    ret << "Handler for ENI " << eniStr << " is " << (healthy ? "healthy" : "UNHEALTHY") << std::endl;
 
     ret << tunnelIn.output_str();
 #ifndef NO_RETURN_TRAFFIC
@@ -377,19 +385,20 @@ std::string GeneveHandlerENIHealthCheck::output_str()
 json GeneveHandlerENIHealthCheck::output_json()
 {
 #ifndef NO_RETURN_TRAFFIC
-    return {{"eniStr", eniStr}, {"tunnelIn", tunnelIn.output_json()}, {"tunnelOut", tunnelOut.output_json()}, {"v4FlowCache", v4FlowCache.output_json()}, {"v6FlowCache", v6FlowCache.output_json()}};
+    return {{"healthy", healthy}, {"eniStr", eniStr}, {"tunnelIn", tunnelIn.output_json()}, {"tunnelOut", tunnelOut.output_json()}, {"v4FlowCache", v4FlowCache.output_json()}, {"v6FlowCache", v6FlowCache.output_json()}};
 #else
-    return {{"eniStr", eniStr}, {"tunnelIn", tunnelIn.output_json()}};
+    return {{"healthy", healthy}, {"eniStr", eniStr}, {"tunnelIn", tunnelIn.output_json()}};
 #endif
-    // TODO.
 }
 
 GeneveHandlerENIHealthCheck GeneveHandlerENI::check()
 {
 #ifndef NO_RETURN_TRAFFIC
-    return { eniStr, tunnelIn->status(), tunnelOut->status(), gwlbV4Cookies.check(), gwlbV6Cookies.check()};
+    bool healthy = tunnelIn->healthCheck() && tunnelOut->healthCheck();
+    return { healthy, eniStr, tunnelIn->status(), tunnelOut->status(), gwlbV4Cookies.check(), gwlbV6Cookies.check()};
 #else
-    return { eniStr, tunnelIn->status() };
+    bool healthy = tunnelIn->healthCheck();
+    return { healthy, eniStr, tunnelIn->status() };
 #endif
 }
 

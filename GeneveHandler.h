@@ -47,14 +47,16 @@ public:
 class GeneveHandlerENIHealthCheck : public HealthCheck {
 public:
 #ifndef NO_RETURN_TRAFFIC
-    GeneveHandlerENIHealthCheck(std::string, TunInterfaceHealthCheck, TunInterfaceHealthCheck, FlowCacheHealthCheck, FlowCacheHealthCheck);
+    GeneveHandlerENIHealthCheck(bool, std::string, TunInterfaceHealthCheck, TunInterfaceHealthCheck, FlowCacheHealthCheck, FlowCacheHealthCheck);
 #else
-    GeneveHandlerENIHealthCheck(std::string, TunInterfaceHealthCheck);
+    GeneveHandlerENIHealthCheck(bool, std::string, TunInterfaceHealthCheck);
 #endif
     std::string output_str() ;
     json output_json();
+    bool isHealthy() const { return healthy; }
 
 private:
+    bool healthy;
     std::string eniStr;
     TunInterfaceHealthCheck tunnelIn;
 #ifndef NO_RETURN_TRAFFIC
