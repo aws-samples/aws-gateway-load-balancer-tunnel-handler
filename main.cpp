@@ -287,6 +287,7 @@ int main(int argc, char *argv[])
     }
 
     signal(SIGINT, shutdownHandler);
+    signal(SIGTERM, shutdownHandler);
 
     ThreadConfig udp, tun;
     ParseThreadConfiguration(udpthreads, udpaffinity, &udp);
