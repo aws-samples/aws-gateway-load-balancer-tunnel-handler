@@ -15,6 +15,7 @@
 #include "GeneveHandler.h"
 #include "utils.h"
 #include <arpa/inet.h>
+#include <unistd.h>
 #include <utility>
 #include "Logger.h"
 
@@ -201,6 +202,7 @@ GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& 
 #else
     devOutName("none"s),
 #endif
+        sendingSock(-1),
         createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback))
 {
     // Set up a socket we use for sending traffic out for ENI.
@@ -217,6 +219,12 @@ GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& 
 GeneveHandlerENI::~GeneveHandlerENI()
 {
     this->destroyCallback(devInName, devOutName, this->eni);
+    // Release the raw sending socket. Without this, recycling an idle ENI (the -t timeout path) leaks one
+    // fd per teardown. sendingSock is -1 when NO_RETURN_TRAFFIC is defined (the socket is never created),
+    // so the guard keeps that build correct. The tun devices themselves are released when the tunnelIn /
+    // tunnelOut unique_ptrs below are destroyed (see TunInterface::shutdown()).
+    if(sendingSock >= 0)
+        close(sendingSock);
 }
 
 /**

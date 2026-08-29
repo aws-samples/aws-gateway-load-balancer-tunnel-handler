@@ -103,6 +103,14 @@ void TunInterface::shutdown()
         if(!allgood)
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
+
+    // Every reader thread has now stopped. Close each per-writer-thread queue fd we handed out in
+    // writePacket(); together with the reader fds closed in ~TunInterfaceThread this detaches all queues
+    // so the non-persistent tun device is removed by the kernel. This is race-free against writePacket():
+    // an ENI (and thus this TunInterface) is only destroyed once no callback still holds a shared_ptr to
+    // it, so no thread can be inside writePacket() at this point. clear() makes a second shutdown() a no-op.
+    writerHandles.visit_all([](auto& wh) { if(wh.second >= 0) close(wh.second); });
+    writerHandles.clear();
 }
 
 /**
@@ -163,7 +171,7 @@ std::chrono::steady_clock::time_point TunInterface::lastPacketTime()
  */
 
 TunInterfaceThread::TunInterfaceThread()
-: setupCalled(false),lastPacket(std::chrono::steady_clock::now()),pktsIn(0),pktsOut(0),bytesIn(0),bytesOut(0),shutdownRequested(false)
+: setupCalled(false),lastPacket(std::chrono::steady_clock::now()),pktsIn(0),pktsOut(0),bytesIn(0),bytesOut(0),shutdownRequested(false),fd(-1)
 {
 
 }
@@ -180,6 +188,16 @@ TunInterfaceThread::~TunInterfaceThread() noexcept
             LOG(LS_TUNNEL, LL_INFO, "Tunnel thread "s + ts(threadNumber) + " has not yet shutdown - waiting more."s);
             status = thread.wait_for(std::chrono::seconds(1));
         }
+    }
+    // The reader thread has stopped, so nothing is using this queue's fd any more. Close it to detach the
+    // queue from the tun device. The device is created non-persistent (no IFF_PERSIST), so once every queue
+    // fd (all reader threads here, plus the writer fds closed in TunInterface::shutdown()) is closed, the
+    // kernel tears the device down. Without this, the -t idle-timeout path leaks fds and leaves the device
+    // (and its now-orphaned queues) behind.
+    if(fd >= 0)
+    {
+        close(fd);
+        fd = -1;
     }
 }
 
