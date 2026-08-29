@@ -185,7 +185,9 @@ void Logger::LogHexDump(LogSection ls, LogLevel ll, const void *buffer, std::siz
                 bzero(hexBuf, 140);
                 bzero(printBuf, 36);
                 if(showPrintableChars) strcpy(printBuf, " | ");
-                snprintf(hexBuf, 7, "%04zx: ", offset);
+                // Offsets are into packet buffers (<= 64KiB), so mask to 16 bits: this keeps the
+                // label a fixed 4 hex digits and lets the compiler see it fits the 7-byte field.
+                snprintf(hexBuf, 7, "%04x: ", (unsigned int)(offset & 0xFFFF));
             }
             snprintf(&hexBuf[5+((offset % 32)*3)], 4, " %02x", cBuffer[offset]);
             if(showPrintableChars)
