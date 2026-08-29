@@ -79,32 +79,41 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
     }
 
     // Work through the packet buffer, option-by-option, moving pktPtr as needed.
+    unsigned char *optRegionEnd = &pktBuf[8 + optLen];
     pktPtr = &pktBuf[8];
-    while(pktPtr < &pktBuf[8 + optLen])
+    while(pktPtr < optRegionEnd)
     {
-        // Parse option header. See RFC 8926 section 3.5.
+        // Need at least 4 bytes left for the option header itself. See RFC 8926 section 3.5.
+        if(pktPtr + 4 > optRegionEnd)
+            break;
+
         uint16_t optClass = be16toh(*(uint16_t *)&pktPtr[0]);
         uint8_t optType = (uint8_t)pktPtr[2];
-        uint8_t optLen = (pktPtr[3] & 0x1f) * 4;
-        unsigned char *optData = (optLen > 0) ? &pktPtr[4] : nullptr;
+        uint8_t innerOptLen = (pktPtr[3] & 0x1f) * 4;
+
+        // The option's declared data length must also fit within the remaining option region.
+        if(pktPtr + 4 + innerOptLen > optRegionEnd)
+            break;
+
+        unsigned char *optData = (innerOptLen > 0) ? &pktPtr[4] : nullptr;
 
         // check for AWS specific options for GWLB.
-        if(optClass == 0x108 && optType == 1 && optLen == 8)
+        if(optClass == 0x108 && optType == 1 && innerOptLen == 8)
         {
             gwlbeEniIdValid = true;
             gwlbeEniId = be64toh(*(uint64_t *)optData);
         }
-        else if(optClass == 0x108 && optType == 2 && optLen == 8)
+        else if(optClass == 0x108 && optType == 2 && innerOptLen == 8)
         {
             attachmentIdValid = true;
             attachmentId = be64toh(*(uint64_t *)optData);
         }
-        else if(optClass == 0x108 && optType == 3 && optLen == 4)
+        else if(optClass == 0x108 && optType == 3 && innerOptLen == 4)
         {
             flowCookieValid = true;
             flowCookie = be32toh(*(uint32_t *)optData);
         }
-        pktPtr += 4 + optLen;
+        pktPtr += 4 + innerOptLen;
     }
 
     headerLen = 8 + optLen;
