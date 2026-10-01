@@ -155,7 +155,15 @@ GeneveHandlerHealthCheck GeneveHandler::check()
     // Check remaining handlers.
     eniHandlers.visit_all([&enis](auto& eniHandler) { enis.push_back( (*eniHandler.second.ptr).check() );  ; });
 
-    return { udpRcvr.healthCheck(), udpRcvr.status(), enis };
+    // Aggregate overall health: UDP receiver threads plus every ENI's tunnel threads. Previously
+    // this->healthy was never written, so main.cpp's health endpoint always reported 200 OK.
+    bool enisHealthy = true;
+    for(auto &eni : enis)
+        if(!eni.isHealthy())
+            enisHealthy = false;
+    this->healthy = udpRcvr.healthCheck() && enisHealthy;
+
+    return { this->healthy, udpRcvr.status(), enis };
 }
 
 /**
@@ -424,14 +432,14 @@ void GeneveHandlerENI::writeToTun(const unsigned char *pkt, ssize_t pktlen)
  * Perform a health check on this ENI, and return some information.
  * @return
  */
-GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(std::string eniStr,
+GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(bool healthy, std::string eniStr,
                                                          uint64_t pktsOut, uint64_t bytesOut, uint64_t pktsDropped, std::chrono::steady_clock::time_point lastPacketOut,
                                                          TunInterfaceHealthCheck tunnelIn
 #ifndef NO_RETURN_TRAFFIC
                                                          , TunInterfaceHealthCheck tunnelOut, FlowCacheHealthCheck v4FlowCache, FlowCacheHealthCheck v6FlowCache
 #endif
                                                          ) :
-        eniStr(eniStr), pktsOut(pktsOut), bytesOut(bytesOut), pktsDropped(pktsDropped), lastPacketOut(lastPacketOut), tunnelIn(std::move(tunnelIn))
+        healthy(healthy), eniStr(eniStr), pktsOut(pktsOut), bytesOut(bytesOut), pktsDropped(pktsDropped), lastPacketOut(lastPacketOut), tunnelIn(std::move(tunnelIn))
 #ifndef NO_RETURN_TRAFFIC
         , tunnelOut(std::move(tunnelOut)), v4FlowCache(std::move(v4FlowCache)), v6FlowCache(std::move(v6FlowCache))
 #endif
@@ -442,7 +450,7 @@ std::string GeneveHandlerENIHealthCheck::output_str()
 {
     std::stringstream ret;
 
-    ret << "Handler for ENI " << eniStr << std::endl;
+    ret << "Handler for ENI " << eniStr << " is " << (healthy ? "healthy" : "UNHEALTHY") << std::endl;
     ret << std::to_string(pktsOut) << " packets out to OS, " << std::to_string(bytesOut) << " bytes out to OS, " << std::to_string(pktsDropped) << " packets dropped on write, " << timepointDeltaString(std::chrono::steady_clock::now(), lastPacketOut) + " since last packet.\n";
     ret << tunnelIn.output_str();
 #ifndef NO_RETURN_TRAFFIC
@@ -456,7 +464,7 @@ std::string GeneveHandlerENIHealthCheck::output_str()
 
 json GeneveHandlerENIHealthCheck::output_json()
 {
-    return {{"eniStr", eniStr}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"pktsDropped", pktsDropped}, {"secsSinceLastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacketOut)}, {"tunnelIn", tunnelIn.output_json()}
+    return {{"healthy", healthy}, {"eniStr", eniStr}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"pktsDropped", pktsDropped}, {"secsSinceLastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacketOut)}, {"tunnelIn", tunnelIn.output_json()}
 #ifndef NO_RETURN_TRAFFIC
     , {"tunnelOut", tunnelOut.output_json()}, {"v4FlowCache", v4FlowCache.output_json()}, {"v6FlowCache", v6FlowCache.output_json()}
 #endif
@@ -465,7 +473,12 @@ json GeneveHandlerENIHealthCheck::output_json()
 
 GeneveHandlerENIHealthCheck GeneveHandlerENI::check()
 {
-    return { eniStr, pktsOut.load(), bytesOut.load(), pktsDropped.load(), lastPacketOut.load(), tunnelIn->status()
+#ifndef NO_RETURN_TRAFFIC
+    bool healthy = tunnelIn->healthCheck() && tunnelOut->healthCheck();
+#else
+    bool healthy = tunnelIn->healthCheck();
+#endif
+    return { healthy, eniStr, pktsOut.load(), bytesOut.load(), pktsDropped.load(), lastPacketOut.load(), tunnelIn->status()
 #ifndef NO_RETURN_TRAFFIC
              , tunnelOut->status(), gwlbV4Cookies.check(), gwlbV6Cookies.check()
 #endif

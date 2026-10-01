@@ -46,15 +46,17 @@ public:
 
 class GeneveHandlerENIHealthCheck : public HealthCheck {
 public:
-    GeneveHandlerENIHealthCheck(std::string, uint64_t pktsOut, uint64_t bytesOut, uint64_t pktsDropped, std::chrono::steady_clock::time_point lastPacketOut, TunInterfaceHealthCheck
+    GeneveHandlerENIHealthCheck(bool, std::string, uint64_t pktsOut, uint64_t bytesOut, uint64_t pktsDropped, std::chrono::steady_clock::time_point lastPacketOut, TunInterfaceHealthCheck
 #ifndef NO_RETURN_TRAFFIC
                                 , TunInterfaceHealthCheck, FlowCacheHealthCheck, FlowCacheHealthCheck
 #endif
                                 );
     std::string output_str() ;
     json output_json();
+    bool isHealthy() const { return healthy; }
 
 private:
+    bool healthy;
     std::string eniStr;
     uint64_t pktsOut, bytesOut, pktsDropped;
     std::chrono::steady_clock::time_point lastPacketOut;
