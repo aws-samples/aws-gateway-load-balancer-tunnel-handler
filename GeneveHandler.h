@@ -46,7 +46,7 @@ public:
 
 class GeneveHandlerENIHealthCheck : public HealthCheck {
 public:
-    GeneveHandlerENIHealthCheck(std::string, uint64_t pktsOut, uint64_t bytesOut, std::chrono::steady_clock::time_point lastPacketOut, TunInterfaceHealthCheck
+    GeneveHandlerENIHealthCheck(std::string, uint64_t pktsOut, uint64_t bytesOut, uint64_t pktsDropped, std::chrono::steady_clock::time_point lastPacketOut, TunInterfaceHealthCheck
 #ifndef NO_RETURN_TRAFFIC
                                 , TunInterfaceHealthCheck, FlowCacheHealthCheck, FlowCacheHealthCheck
 #endif
@@ -56,7 +56,7 @@ public:
 
 private:
     std::string eniStr;
-    uint64_t pktsOut, bytesOut;
+    uint64_t pktsOut, bytesOut, pktsDropped;
     std::chrono::steady_clock::time_point lastPacketOut;
 
     TunInterfaceHealthCheck tunnelIn;
@@ -97,6 +97,8 @@ private:
     std::atomic<uint64_t> pktsOut{0}; 
     std::atomic<uint64_t> bytesOut{0}; 
     std::atomic<std::chrono::steady_clock::time_point> lastPacketOut;
+    std::atomic<uint64_t> pktsDropped{0};
+    void writeToTun(const unsigned char *pkt, ssize_t pktlen) __attribute__((hot));
 
     // Socket used by all threads for sending
     int sendingSock;
