@@ -321,7 +321,7 @@ int main(int argc, char *argv[])
     // GWLB only supports IPv4.
     if(healthCheck > 0)
     {
-        if((healthSocket = socket(AF_INET6, SOCK_STREAM, 0)) == 0)
+        if((healthSocket = socket(AF_INET6, SOCK_STREAM, 0)) < 0)
         {
             LOG(LS_CORE, LL_CRITICAL, "Creating health check socket failed: "s + std::strerror(errno));
             exit(EXIT_FAILURE);

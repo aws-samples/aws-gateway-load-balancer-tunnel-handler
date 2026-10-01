@@ -206,7 +206,7 @@ void UDPPacketReceiverThread::setup(int threadNumberParam, int coreNumberParam, 
         }
     }
 
-    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) == 0)
+    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
         throw std::system_error(errno, std::generic_category(), "Socket creation failed");
 
     if(setsockopt(sock, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &yes, sizeof(yes)))
