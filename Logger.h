@@ -49,8 +49,8 @@ struct LoggingMessage {
 
 extern class Logger *logger;
 
-#define LOG(s,l,msg,...) { if(logger->cfg.ll[s] >= l) logger->Log(s, l, msg, ##__VA_ARGS__); };
-#define LOGHEXDUMP(s,l,hdr,buf,buflen) { if(logger->cfg.ll[s] >= l) logger->LogHexDump(s, l, buf, buflen); };
+#define LOG(s,l,msg,...) do { if(logger->cfg.ll[s] >= l) logger->Log(s, l, msg, ##__VA_ARGS__); } while(0)
+#define LOGHEXDUMP(s,l,hdr,buf,buflen) do { if(logger->cfg.ll[s] >= l) logger->LogHexDump(s, l, buf, buflen); } while(0)
 #define IS_LOGGING(s,l) (logger->cfg.ll[s] <= l)
 #define ts(s)  std::to_string(s)
 
