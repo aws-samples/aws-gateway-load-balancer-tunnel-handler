@@ -1,3 +1,11 @@
+## Current Development Branch (v3.2):
+- recvmmsg() batch receive on the UDP ingress path, configurable SO_RCVBUF, and reduced shutdown latency for higher throughput (#21, thanks @nikvouk-aws).
+- Prometheus text exposition format for the health check port (#27, thanks @lyoung-confluent).
+- Container image and Kubernetes DaemonSet manifest (#13, thanks @ahmetayd).
+- Fixes: malformed health-check JSON (#26), uninitialized health socket busy-loop (#29), uninitialized outer UDP checksum (#28), Geneve per-option bounds check (#31), socket/write return-value handling (#32), fd cleanup on ENI teardown (#36), compiler warnings (#33), and build hygiene (#24, #25) - thanks @lyoung-confluent.
+
+(Note: v3.2 is in integration on dev-oct2026-prs; the above reflects the planned wave and is reconciled with the merged set at release.)
+
 ## Current Development Branch (v3.1):
 - Performance improvements to /dev/net/tun handling, packet manipulation, and memory usage. The improvements help more on higher CPU core counts - at 4 cores, the improvements result in approximately 4.3% improvement as measured by packets per second, but at 32 cores it's 37.2% more.
 - Clean up /dev/net/tun fd handling to reduce file descriptor count
