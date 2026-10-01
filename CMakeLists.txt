@@ -64,7 +64,6 @@ configure_file(
     @ONLY
 )
 
-set(Boost_INCLUDE_DIR /home/ec2-user/boost)
 find_package(Boost 1.83 REQUIRED)
 if(Boost_FOUND)
     include_directories(${Boost_INCLUDE_DIRS})
