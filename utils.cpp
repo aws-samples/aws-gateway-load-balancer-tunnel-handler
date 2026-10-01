@@ -99,6 +99,7 @@ bool sendUdpSG(int sock, struct in_addr from_addr, uint16_t from_port,
     headers.udp.source = htons(from_port);
     headers.udp.dest = htons(to_port);
     headers.udp.len = htons(sizeof(struct udphdr) + total_payload);
+    headers.udp.check = 0;   // 0 = no UDP checksum (valid for IPv4). The kernel does not compute it for raw IP_HDRINCL sockets, so an unset field would ship stack garbage.
 
     // Build iovec array: headers + payload segments
     struct iovec iov[payload_iovcnt + 1];
