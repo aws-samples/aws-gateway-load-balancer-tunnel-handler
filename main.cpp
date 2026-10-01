@@ -158,6 +158,8 @@ void printHelp(char *progname)
             "Performance options:\n"
             "  --rcvbuf SIZE            Socket receive buffer size in megabytes. Default is 128MB.\n"
             "                           For 50+ Gbps throughput, use 128-256MB. Requires net.core.rmem_max sysctl >= SIZE*1024*1024.\n"
+            "  --busypoll USEC          Busy-poll the NIC up to USEC microseconds per receive (lower latency, higher CPU).\n"
+            "                           Default 0 (disabled). Try 50 for latency-sensitive high packet rates.\n"
             "\n"
             "AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.\n"
             "It is recommended to have the same number of UDP threads as tunnel processor threads, in one-arm operation.\n"
@@ -205,6 +207,7 @@ int main(int argc, char *argv[])
     int tunnelTimeout = 0, cacheTimeout = 350;
     int udpthreads = numCores();
     int rcvBufSizeMB = 128;  // Socket receive buffer size in MB (default 128MB for 50+ Gbps)
+    int busyPollUsec = 0;    // SO_BUSY_POLL microseconds per receive (0 = disabled)
 #ifndef NO_RETURN_TRAFFIC
     int tunthreads = numCores();
 #endif
@@ -229,6 +232,7 @@ int main(int argc, char *argv[])
             {"tunaffinity", required_argument, NULL, 0},   // optind 13
 #endif
             {"rcvbuf", required_argument, NULL, 0},        // optind 14 (or 12 in NO_RETURN_TRAFFIC mode)
+            {"busypoll", required_argument, NULL, 0},      // optind 15 (or 13 in NO_RETURN_TRAFFIC mode)
             {0, 0, 0, 0}
     };
 
@@ -260,9 +264,15 @@ int main(int argc, char *argv[])
                     case 14:
                         rcvBufSizeMB = atoi(optarg);
                         break;
+                    case 15:
+                        busyPollUsec = atoi(optarg);
+                        break;
 #else
                     case 12:
                         rcvBufSizeMB = atoi(optarg);
+                        break;
+                    case 13:
+                        busyPollUsec = atoi(optarg);
                         break;
 #endif
                 }
@@ -355,7 +365,7 @@ int main(int argc, char *argv[])
     tun.cfg.resize(0);
 #endif
 
-    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, cacheTimeout, udp, tun, rcvBufSizeMB);
+    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, cacheTimeout, udp, tun, rcvBufSizeMB, busyPollUsec);
     struct timespec timeout;
     timeout.tv_sec = 1; timeout.tv_nsec = 0;
     fd_set fds;

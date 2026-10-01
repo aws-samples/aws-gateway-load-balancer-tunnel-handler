@@ -72,7 +72,7 @@ void UDPPacketReceiver::shutdown()
  * @param recvDispatcherParam Function to callback to on each packet received.
  * @param rcvBufSizeMB Socket receive buffer size in megabytes (default 128MB).
  */
-void UDPPacketReceiver::setup(ThreadConfig threadConfig, uint16_t portNumberParam, udpCallback recvDispatcherParam, int rcvBufSizeMB)
+void UDPPacketReceiver::setup(ThreadConfig threadConfig, uint16_t portNumberParam, udpCallback recvDispatcherParam, int rcvBufSizeMB, int busyPollUsec)
 {
     LOG(LS_UDP, LL_DEBUG, "UDP receiver setting up on port "s + ts(portNumberParam) + " with "s + ts(rcvBufSizeMB) + "MB receive buffer"s);
     portNumber = portNumberParam;
@@ -81,7 +81,7 @@ void UDPPacketReceiver::setup(ThreadConfig threadConfig, uint16_t portNumberPara
     int tIndex = 0;
     for(int core : threadConfig.cfg)
     {
-        threads[tIndex].setup(tIndex, core, portNumberParam, recvDispatcherParam, rcvBufSizeMB);
+        threads[tIndex].setup(tIndex, core, portNumberParam, recvDispatcherParam, rcvBufSizeMB, busyPollUsec);
         tIndex ++;
     }
 }
@@ -150,7 +150,7 @@ UDPPacketReceiverThread::~UDPPacketReceiverThread()
 }
 
 void UDPPacketReceiverThread::setup(int threadNumberParam, int coreNumberParam, uint16_t portNumberParam,
-                                    udpCallback recvDispatcherParam, int rcvBufSizeMB)
+                                    udpCallback recvDispatcherParam, int rcvBufSizeMB, int busyPollUsec)
 {
     int yes = 1;
     struct sockaddr_in address{};
@@ -234,11 +234,16 @@ void UDPPacketReceiverThread::setup(int threadNumberParam, int coreNumberParam, 
         }
     }
 
-    // Enable busy polling for lower latency (50 microseconds)
-    // This reduces latency by polling the NIC more frequently
-    int busy_poll = 50;
-    if(setsockopt(sock, SOL_SOCKET, SO_BUSY_POLL, &busy_poll, sizeof(busy_poll)) < 0)
-        LOG(LS_UDP, LL_DEBUG, "Note: SO_BUSY_POLL not supported on this kernel (requires Linux 3.11+)");
+    // Optionally enable NIC busy polling (--busypoll USEC; 0 = disabled).
+    // Trades CPU for lower receive latency; most beneficial at high packet rates.
+    int busy_poll = busyPollUsec;
+    if(busyPollUsec > 0)
+    {
+        if(setsockopt(sock, SOL_SOCKET, SO_BUSY_POLL, &busy_poll, sizeof(busy_poll)) < 0)
+            LOG(LS_UDP, LL_DEBUG, "Note: SO_BUSY_POLL not supported on this kernel (requires Linux 3.11+)");
+        else if(threadNumber == 0)
+            LOG(LS_UDP, LL_IMPORTANT, "Busy polling enabled ("s + ts(busyPollUsec) + "us per receive)."s);
+    }
 
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
@@ -252,7 +257,7 @@ void UDPPacketReceiverThread::setup(int threadNumberParam, int coreNumberParam, 
     if(bind(sock, (const struct sockaddr *)&address, (socklen_t)sizeof(address)) < 0)
         throw std::system_error(errno, std::generic_category(), "Port binding failed");
 
-    LOG(LS_UDP, LL_DEBUG, "UDP receiver thread "s + ts(threadNumber) + " configured with "s + ts(rcvBufSizeMB) + "MB receive buffer and busy polling"s);
+    LOG(LS_UDP, LL_DEBUG, "UDP receiver thread "s + ts(threadNumber) + " configured with "s + ts(rcvBufSizeMB) + "MB receive buffer"s);
 
     thread = std::async(&UDPPacketReceiverThread::threadFunction, this);
 }

@@ -129,7 +129,7 @@ private:
 
 class GeneveHandler {
 public:
-    GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB = 128);
+    GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB = 128, int busyPollUsec = 0);
     void udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort);
     GeneveHandlerHealthCheck check();
     bool healthy;                  // Updated by check()

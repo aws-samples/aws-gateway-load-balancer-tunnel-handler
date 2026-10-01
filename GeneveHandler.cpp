@@ -63,13 +63,13 @@ std::string GwlbData::text()
  * @param tunThreads Thread configuration for TUN interface threads.
  * @param rcvBufSizeMB Socket receive buffer size in megabytes (default 128MB).
  */
-GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB)
+GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB, int busyPollUsec)
         : healthy(true),
           createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)), eniDestroyTimeout(destroyTimeout), cacheTimeout(cacheTimeout),
           tunThreadConfig(std::move(tunThreads))
 {
     // Set up UDP receiver threads.
-    udpRcvr.setup(udpThreads, GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6), rcvBufSizeMB);
+    udpRcvr.setup(udpThreads, GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6), rcvBufSizeMB, busyPollUsec);
 }
 
 /**
