@@ -68,10 +68,16 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
     
     while(pktPtr < pktEnd)
     {
-        // Parse option header. See RFC 8926 section 3.5.
+        // Need at least 4 bytes left for the option header itself. See RFC 8926 section 3.5.
+        if(pktPtr + 4 > pktEnd)
+            break;
         uint16_t optClass = be16toh(*(uint16_t *)&pktPtr[0]);
         uint8_t optType = pktPtr[2];
         uint8_t optLen = (pktPtr[3] & 0x1f) * 4;
+        // The option's declared data length must also fit within the remaining option region,
+        // otherwise a malformed/truncated packet could read past it into stale buffer bytes.
+        if(pktPtr + 4 + optLen > pktEnd)
+            break;
         unsigned char *optData = &pktPtr[4];
 
         // Check for AWS specific options for GWLB (class 0x108)
