@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * PacketHeaderV4 class serves to interpret and provide a hashing function for an IPv6 header, looking at similiar fields
+ * PacketHeaderV6 class serves to interpret and provide a hashing function for an IPv6 header, looking at similiar fields
  * to what GWLB does when producing a flow cookie.
  */
 

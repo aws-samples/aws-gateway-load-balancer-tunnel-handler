@@ -1,8 +1,5 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
-//
-// Quick class to generate hashes of IPv4 packets for use in std::unordered_map
-//
 
 #ifndef GWLBTUN_PACKETHEADERV4_H
 #define GWLBTUN_PACKETHEADERV4_H

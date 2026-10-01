@@ -155,6 +155,10 @@ void printHelp(char *progname)
             "  --tunaffinity AFFIN      Generate threads for each tunnel processor, pinned to the cores listed. Takes precedence over tunthreads.\n"
 #endif
             "\n"
+            "Performance options:\n"
+            "  --rcvbuf SIZE            Socket receive buffer size in megabytes. Default is 128MB.\n"
+            "                           For 50+ Gbps throughput, use 128-256MB. Requires net.core.rmem_max sysctl >= SIZE*1024*1024.\n"
+            "\n"
             "AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.\n"
             "It is recommended to have the same number of UDP threads as tunnel processor threads, in one-arm operation.\n"
             "If unspecified, the thread argument(s) will assume %d as a default, based on the number of cores present.\n"
@@ -200,6 +204,7 @@ int main(int argc, char *argv[])
     int healthCheck = 0, healthSocket = -1;
     int tunnelTimeout = 0, cacheTimeout = 350;
     int udpthreads = numCores();
+    int rcvBufSizeMB = 128;  // Socket receive buffer size in MB (default 128MB for 50+ Gbps)
 #ifndef NO_RETURN_TRAFFIC
     int tunthreads = numCores();
 #endif
@@ -223,6 +228,7 @@ int main(int argc, char *argv[])
             {"tunthreads", required_argument, NULL, 0},    // optind 12
             {"tunaffinity", required_argument, NULL, 0},   // optind 13
 #endif
+            {"rcvbuf", required_argument, NULL, 0},        // optind 14 (or 12 in NO_RETURN_TRAFFIC mode)
             {0, 0, 0, 0}
     };
 
@@ -250,6 +256,13 @@ int main(int argc, char *argv[])
                         break;
                     case 13:
                         tunaffinity = std::string(optarg);
+                        break;
+                    case 14:
+                        rcvBufSizeMB = atoi(optarg);
+                        break;
+#else
+                    case 12:
+                        rcvBufSizeMB = atoi(optarg);
                         break;
 #endif
                 }
@@ -304,6 +317,14 @@ int main(int argc, char *argv[])
             exit(EXIT_FAILURE);
         }
 
+        // Disable IPV6_V6ONLY to allow IPv4 connections on the IPv6 socket (dual-stack)
+        // This is required on RHEL 10+ where IPV6_V6ONLY defaults to 1
+        int v6only = 0;
+        if(setsockopt(healthSocket, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) < 0)
+        {
+            LOG(LS_CORE, LL_IMPORTANT, "Warning: Could not disable IPV6_V6ONLY, IPv4 health checks may not work: "s + std::strerror(errno));
+        }
+
         struct sockaddr_in6 addr;
         bzero(&addr, sizeof(addr));
 
@@ -316,6 +337,7 @@ int main(int argc, char *argv[])
             exit(EXIT_FAILURE);
         }
         listen(healthSocket, 3);
+        LOG(LS_CORE, LL_IMPORTANT, "Health check listening on port %d (IPv4 and IPv6)", healthCheck);
     }
 
     signal(SIGINT, shutdownHandler);
@@ -333,7 +355,7 @@ int main(int argc, char *argv[])
     tun.cfg.resize(0);
 #endif
 
-    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, cacheTimeout, udp, tun);
+    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, cacheTimeout, udp, tun, rcvBufSizeMB);
     struct timespec timeout;
     timeout.tv_sec = 1; timeout.tv_nsec = 0;
     fd_set fds;

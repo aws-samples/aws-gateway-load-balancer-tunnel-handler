@@ -20,7 +20,7 @@
 
 using namespace std::string_literals;
 
-#define GWLB_MTU           8500         // MTU of customer payload packets that can be processed
+#define GWLB_MTU           8500         // MTU of inner/decapsulated packets (TUN interface)
 #define GENEVE_PORT        6081         // UDP port number that GENEVE uses by standard
 
 // Define the thread-local cache declared in the header
@@ -41,7 +41,7 @@ GwlbData::GwlbData() {}
  * @param dstPort Destination port of the GENEVE packet
  */
 GwlbData::GwlbData(GeneveHeader header, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort) :
-       srcAddr(*srcAddr), dstAddr(*dstAddr), srcPort(srcPort), dstPort(dstPort),  header(std::move(header))
+       header(std::move(header)), srcAddr(*srcAddr), dstAddr(*dstAddr), srcPort(srcPort), dstPort(dstPort)
 {
 }
 
@@ -58,14 +58,18 @@ std::string GwlbData::text()
  * @param createCallback Function to call when a new endpoint is seen.
  * @param destroyCallback Function to call when an endpoint has gone away and we need to clean up.
  * @param destroyTimeout How long to wait for an endpoint to be idle before calling destroyCallback.
+ * @param cacheTimeout Timeout for flow cache entries.
+ * @param udpThreads Thread configuration for UDP receiver threads.
+ * @param tunThreads Thread configuration for TUN interface threads.
+ * @param rcvBufSizeMB Socket receive buffer size in megabytes (default 128MB).
  */
-GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads)
+GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB)
         : healthy(true),
           createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)), eniDestroyTimeout(destroyTimeout), cacheTimeout(cacheTimeout),
           tunThreadConfig(std::move(tunThreads))
 {
     // Set up UDP receiver threads.
-    udpRcvr.setup(udpThreads, GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6));
+    udpRcvr.setup(udpThreads, GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6), rcvBufSizeMB);
 }
 
 /**
@@ -93,7 +97,40 @@ json GeneveHandlerHealthCheck::output_json()
 {
     json ret;
 
-    ret = { {"udp", udp.output_json()}, {"enis", json::array()} };
+    // Calculate aggregate totals
+    uint64_t totalPktsIn = 0, totalBytesIn = 0;
+    uint64_t totalPktsOut = 0, totalBytesOut = 0;
+    
+    // Sum UDP receiver stats (packets in)
+    auto udpJson = udp.output_json();
+    if(udpJson.contains("UDPPacketReceiver") && udpJson["UDPPacketReceiver"].contains("threads"))
+    {
+        for(auto& thread : udpJson["UDPPacketReceiver"]["threads"])
+        {
+            if(thread.contains("pktsIn")) totalPktsIn += thread["pktsIn"].get<uint64_t>();
+            if(thread.contains("bytesIn")) totalBytesIn += thread["bytesIn"].get<uint64_t>();
+        }
+    }
+    
+    // Sum ENI stats (packets out to OS)
+    for(auto &eni : enis)
+    {
+        auto eniJson = eni.output_json();
+        if(eniJson.contains("pktsOut")) totalPktsOut += eniJson["pktsOut"].get<uint64_t>();
+        if(eniJson.contains("bytesOut")) totalBytesOut += eniJson["bytesOut"].get<uint64_t>();
+    }
+
+    ret = { 
+        {"summary", {
+            {"totalPktsIn", totalPktsIn},
+            {"totalBytesIn", totalBytesIn},
+            {"totalPktsOut", totalPktsOut},
+            {"totalBytesOut", totalBytesOut},
+            {"eniCount", enis.size()}
+        }},
+        {"udp", udpJson}, 
+        {"enis", json::array()} 
+    };
 
     for(auto &eni : enis)
         ret["enis"].push_back(eni.output_json());
