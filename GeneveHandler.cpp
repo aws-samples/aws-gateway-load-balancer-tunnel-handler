@@ -65,9 +65,10 @@ std::string GwlbData::text()
  * @param tunThreads Thread configuration for TUN interface threads.
  * @param rcvBufSizeMB Socket receive buffer size in megabytes (default 128MB).
  */
-GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB, int busyPollUsec)
+GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB, int busyPollUsec)
         : healthy(true),
-          createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)), eniDestroyTimeout(destroyTimeout), cacheTimeout(cacheTimeout),
+          createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)), eniDestroyTimeout(destroyTimeout),
+          tcpCacheTimeout(tcpCacheTimeout), udpCacheTimeout(udpCacheTimeout), otherCacheTimeout(otherCacheTimeout),
           tunThreadConfig(std::move(tunThreads))
 {
     // Set up UDP receiver threads.
@@ -219,7 +220,7 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
         auto cb = [&](const auto& eniHandler) {
             resolvedHandler = eniHandler.second.ptr;
         };
-        if(eniHandlers.try_emplace_or_cvisit(gwlbeEniId, gwlbeEniId, cacheTimeout, tunThreadConfig, createCallback, destroyCallback, cb))
+        if(eniHandlers.try_emplace_or_cvisit(gwlbeEniId, gwlbeEniId, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, tunThreadConfig, createCallback, destroyCallback, cb))
         {
             // We did a create - redo the visit to capture ptr
             eniHandlers.cvisit(gwlbeEniId, cb);
@@ -241,12 +242,17 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
  * GeneveHandlerENI handles all aspects of handling for a given ENI. It is separated out this way to make dealing with
  * keeping all the resources needed on a per ENI basis easier.
  */
-GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback) :
-        eni(eni), eniStr(MakeENIStr(eni)), cacheTimeout(cacheTimeout),
+GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback) :
+        eni(eni), eniStr(MakeENIStr(eni)), tcpCacheTimeout(tcpCacheTimeout), udpCacheTimeout(udpCacheTimeout), otherCacheTimeout(otherCacheTimeout),
         devInName(devname_make(eni, true)),
 #ifndef NO_RETURN_TRAFFIC
         devOutName(devname_make(eni, false)),
-        gwlbV4Cookies("IPv4 Flow Cache for ENI " + eniStr, cacheTimeout), gwlbV6Cookies("IPv6 Flow Cache for ENI " + eniStr, cacheTimeout),
+        gwlbV4CookiesTcp("IPv4 TCP Flow Cache for ENI " + eniStr, tcpCacheTimeout),
+        gwlbV4CookiesUdp("IPv4 UDP Flow Cache for ENI " + eniStr, udpCacheTimeout),
+        gwlbV4CookiesOther("IPv4 Other Flow Cache for ENI " + eniStr, otherCacheTimeout),
+        gwlbV6CookiesTcp("IPv6 TCP Flow Cache for ENI " + eniStr, tcpCacheTimeout),
+        gwlbV6CookiesUdp("IPv6 UDP Flow Cache for ENI " + eniStr, udpCacheTimeout),
+        gwlbV6CookiesOther("IPv6 Other Flow Cache for ENI " + eniStr, otherCacheTimeout),
 #else
     devOutName("none"s),
 #endif
@@ -318,7 +324,12 @@ void GeneveHandlerENI::tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen
             {
                 auto ph = PacketHeaderV4(pktbuf, pktlen);
                 try {
-                    gd = gwlbV4Cookies.lookup(ph);
+                    switch(ph.prot)
+                    {
+                        case IPPROTO_TCP: gd = gwlbV4CookiesTcp.lookup(ph); break;
+                        case IPPROTO_UDP: gd = gwlbV4CookiesUdp.lookup(ph); break;
+                        default:          gd = gwlbV4CookiesOther.lookup(ph); break;
+                    }
                 }
                 catch (std::invalid_argument &e) {
                     LOG(LS_TUNNEL, LL_DEBUG, "Flow " + ph.text() + " has not been seen coming in from GWLB - dropping.  (Remember - GWLB is for inline inspection only - you cannot source new flows from this device into it.)");
@@ -331,7 +342,12 @@ void GeneveHandlerENI::tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen
             {
                 auto ph = PacketHeaderV6(pktbuf, pktlen);
                 try {
-                    gd = gwlbV6Cookies.lookup(ph);
+                    switch(ph.prot)
+                    {
+                        case IPPROTO_TCP: gd = gwlbV6CookiesTcp.lookup(ph); break;
+                        case IPPROTO_UDP: gd = gwlbV6CookiesUdp.lookup(ph); break;
+                        default:          gd = gwlbV6CookiesOther.lookup(ph); break;
+                    }
                 }
                 catch (std::invalid_argument &e) {
                     LOG(LS_TUNNEL, LL_DEBUG, "Flow " + ph.text() + " has not been seen coming in from GWLB - dropping.  (Remember - GWLB is for inline inspection only - you cannot source new flows from this device into it.)");
@@ -382,16 +398,26 @@ void GeneveHandlerENI::udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssiz
             {
 #ifndef NO_RETURN_TRAFFIC
                 auto ph = PacketHeaderV4(pkt + headerLen, pktlen - headerLen);
-                // Ensure flow is in flow cache.
-                gwlbV4Cookies.insert(std::move(ph), std::move(gd));
+                // Ensure flow is in the matching per-protocol flow cache.
+                switch(ph.prot)
+                {
+                    case IPPROTO_TCP: gwlbV4CookiesTcp.insert(std::move(ph), std::move(gd)); break;
+                    case IPPROTO_UDP: gwlbV4CookiesUdp.insert(std::move(ph), std::move(gd)); break;
+                    default:          gwlbV4CookiesOther.insert(std::move(ph), std::move(gd)); break;
+                }
 #endif
                 // Route the decap'ed packet to our tun interface, accounting for drops.
                 writeToTun(pkt + headerLen, pktlen - headerLen);
             } else if(__builtin_expect(iph->ip_v == (unsigned int)6, 0)) {
 #ifndef NO_RETURN_TRAFFIC
                 auto ph = PacketHeaderV6(pkt + headerLen, pktlen - headerLen);
-                // Ensure flow is in flow cache.
-                gwlbV6Cookies.insert(std::move(ph), std::move(gd));
+                // Ensure flow is in the matching per-protocol flow cache.
+                switch(ph.prot)
+                {
+                    case IPPROTO_TCP: gwlbV6CookiesTcp.insert(std::move(ph), std::move(gd)); break;
+                    case IPPROTO_UDP: gwlbV6CookiesUdp.insert(std::move(ph), std::move(gd)); break;
+                    default:          gwlbV6CookiesOther.insert(std::move(ph), std::move(gd)); break;
+                }
 #endif
                 // Route the decap'ed packet to our tun interface, accounting for drops.
                 writeToTun(pkt + headerLen, pktlen - headerLen);
@@ -436,12 +462,16 @@ GeneveHandlerENIHealthCheck::GeneveHandlerENIHealthCheck(bool healthy, std::stri
                                                          uint64_t pktsOut, uint64_t bytesOut, uint64_t pktsDropped, std::chrono::steady_clock::time_point lastPacketOut,
                                                          TunInterfaceHealthCheck tunnelIn
 #ifndef NO_RETURN_TRAFFIC
-                                                         , TunInterfaceHealthCheck tunnelOut, FlowCacheHealthCheck v4FlowCache, FlowCacheHealthCheck v6FlowCache
+                                                         , TunInterfaceHealthCheck tunnelOut,
+                                                         FlowCacheHealthCheck v4FlowCacheTcp, FlowCacheHealthCheck v4FlowCacheUdp, FlowCacheHealthCheck v4FlowCacheOther,
+                                                         FlowCacheHealthCheck v6FlowCacheTcp, FlowCacheHealthCheck v6FlowCacheUdp, FlowCacheHealthCheck v6FlowCacheOther
 #endif
                                                          ) :
         healthy(healthy), eniStr(eniStr), pktsOut(pktsOut), bytesOut(bytesOut), pktsDropped(pktsDropped), lastPacketOut(lastPacketOut), tunnelIn(std::move(tunnelIn))
 #ifndef NO_RETURN_TRAFFIC
-        , tunnelOut(std::move(tunnelOut)), v4FlowCache(std::move(v4FlowCache)), v6FlowCache(std::move(v6FlowCache))
+        , tunnelOut(std::move(tunnelOut)),
+        v4FlowCacheTcp(std::move(v4FlowCacheTcp)), v4FlowCacheUdp(std::move(v4FlowCacheUdp)), v4FlowCacheOther(std::move(v4FlowCacheOther)),
+        v6FlowCacheTcp(std::move(v6FlowCacheTcp)), v6FlowCacheUdp(std::move(v6FlowCacheUdp)), v6FlowCacheOther(std::move(v6FlowCacheOther))
 #endif
 {
 }
@@ -455,8 +485,12 @@ std::string GeneveHandlerENIHealthCheck::output_str()
     ret << tunnelIn.output_str();
 #ifndef NO_RETURN_TRAFFIC
     ret << tunnelOut.output_str();
-    ret << v4FlowCache.output_str();
-    ret << v6FlowCache.output_str();
+    ret << v4FlowCacheTcp.output_str();
+    ret << v4FlowCacheUdp.output_str();
+    ret << v4FlowCacheOther.output_str();
+    ret << v6FlowCacheTcp.output_str();
+    ret << v6FlowCacheUdp.output_str();
+    ret << v6FlowCacheOther.output_str();
 #endif
 
     return ret.str();
@@ -466,7 +500,9 @@ json GeneveHandlerENIHealthCheck::output_json()
 {
     return {{"healthy", healthy}, {"eniStr", eniStr}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"pktsDropped", pktsDropped}, {"secsSinceLastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacketOut)}, {"tunnelIn", tunnelIn.output_json()}
 #ifndef NO_RETURN_TRAFFIC
-    , {"tunnelOut", tunnelOut.output_json()}, {"v4FlowCache", v4FlowCache.output_json()}, {"v6FlowCache", v6FlowCache.output_json()}
+    , {"tunnelOut", tunnelOut.output_json()},
+    {"v4FlowCacheTcp", v4FlowCacheTcp.output_json()}, {"v4FlowCacheUdp", v4FlowCacheUdp.output_json()}, {"v4FlowCacheOther", v4FlowCacheOther.output_json()},
+    {"v6FlowCacheTcp", v6FlowCacheTcp.output_json()}, {"v6FlowCacheUdp", v6FlowCacheUdp.output_json()}, {"v6FlowCacheOther", v6FlowCacheOther.output_json()}
 #endif
     };
 }
@@ -480,7 +516,9 @@ GeneveHandlerENIHealthCheck GeneveHandlerENI::check()
 #endif
     return { healthy, eniStr, pktsOut.load(), bytesOut.load(), pktsDropped.load(), lastPacketOut.load(), tunnelIn->status()
 #ifndef NO_RETURN_TRAFFIC
-             , tunnelOut->status(), gwlbV4Cookies.check(), gwlbV6Cookies.check()
+             , tunnelOut->status(),
+             gwlbV4CookiesTcp.check(), gwlbV4CookiesUdp.check(), gwlbV4CookiesOther.check(),
+             gwlbV6CookiesTcp.check(), gwlbV6CookiesUdp.check(), gwlbV6CookiesOther.check()
 #endif
     };
 }
@@ -505,9 +543,9 @@ bool GeneveHandlerENI::hasGoneIdle(int timeout)
 /**
  * GeneveHandlerENI shared pointer wrapper class
  */
-GeneveHandlerENIPtr::GeneveHandlerENIPtr(eniid_t eni, int cacheTimeout, ThreadConfig &tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback)
+GeneveHandlerENIPtr::GeneveHandlerENIPtr(eniid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig &tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback)
 {
-    ptr = std::make_shared<GeneveHandlerENI>(eni, cacheTimeout, tunThreadConfig, createCallback, destroyCallback);
+    ptr = std::make_shared<GeneveHandlerENI>(eni, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, tunThreadConfig, createCallback, destroyCallback);
 }
 
 

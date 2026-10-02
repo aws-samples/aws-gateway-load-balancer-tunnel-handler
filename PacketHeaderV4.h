@@ -42,12 +42,14 @@ public:
         return hashFunc(prot, (void *)&src, (void *)&dst, 4, srcpt, dstpt);
     }
 
+public:
+    uint8_t   prot;    // Inner IP protocol number — public so flow-cache routing can switch on it.
+
 private:
     uint32_t  src;
     uint32_t  dst;
     uint16_t  srcpt;
     uint16_t  dstpt;
-    uint8_t   prot;
 };
 
 std::ostream &operator<<(std::ostream &os, PacketHeaderV4 const &m);

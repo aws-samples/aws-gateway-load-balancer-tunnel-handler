@@ -48,7 +48,9 @@ class GeneveHandlerENIHealthCheck : public HealthCheck {
 public:
     GeneveHandlerENIHealthCheck(bool, std::string, uint64_t pktsOut, uint64_t bytesOut, uint64_t pktsDropped, std::chrono::steady_clock::time_point lastPacketOut, TunInterfaceHealthCheck
 #ifndef NO_RETURN_TRAFFIC
-                                , TunInterfaceHealthCheck, FlowCacheHealthCheck, FlowCacheHealthCheck
+                                , TunInterfaceHealthCheck,
+                                FlowCacheHealthCheck, FlowCacheHealthCheck, FlowCacheHealthCheck,
+                                FlowCacheHealthCheck, FlowCacheHealthCheck, FlowCacheHealthCheck
 #endif
                                 );
     std::string output_str() ;
@@ -64,14 +66,18 @@ private:
     TunInterfaceHealthCheck tunnelIn;
 #ifndef NO_RETURN_TRAFFIC
     TunInterfaceHealthCheck tunnelOut;
-    FlowCacheHealthCheck v4FlowCache;
-    FlowCacheHealthCheck v6FlowCache;
+    FlowCacheHealthCheck v4FlowCacheTcp;
+    FlowCacheHealthCheck v4FlowCacheUdp;
+    FlowCacheHealthCheck v4FlowCacheOther;
+    FlowCacheHealthCheck v6FlowCacheTcp;
+    FlowCacheHealthCheck v6FlowCacheUdp;
+    FlowCacheHealthCheck v6FlowCacheOther;
 #endif
 };
 
 class GeneveHandlerENI {
 public:
-    GeneveHandlerENI(eniid_t eni, int cacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
+    GeneveHandlerENI(eniid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
     ~GeneveHandlerENI();
     void udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssize_t pktlen) __attribute__((hot));
     void tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));
@@ -81,7 +87,7 @@ public:
 private:
     const eniid_t eni;
     const std::string eniStr;
-    int cacheTimeout;
+    int tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout;
 
     const std::string devInName;
     const std::string devOutName;
@@ -90,8 +96,12 @@ private:
 #ifndef NO_RETURN_TRAFFIC
     std::unique_ptr<TunInterface> tunnelOut;
 
-    FlowCache<PacketHeaderV4, GwlbData> gwlbV4Cookies;
-    FlowCache<PacketHeaderV6, GwlbData> gwlbV6Cookies;
+    FlowCache<PacketHeaderV4, GwlbData> gwlbV4CookiesTcp;
+    FlowCache<PacketHeaderV4, GwlbData> gwlbV4CookiesUdp;
+    FlowCache<PacketHeaderV4, GwlbData> gwlbV4CookiesOther;
+    FlowCache<PacketHeaderV6, GwlbData> gwlbV6CookiesTcp;
+    FlowCache<PacketHeaderV6, GwlbData> gwlbV6CookiesUdp;
+    FlowCache<PacketHeaderV6, GwlbData> gwlbV6CookiesOther;
 #endif
 
     // Socket to write to our associated tunnel
@@ -115,7 +125,7 @@ private:
   */
  class GeneveHandlerENIPtr {
  public:
-    GeneveHandlerENIPtr(eniid_t eni, int idleTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
+    GeneveHandlerENIPtr(eniid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
     std::shared_ptr<GeneveHandlerENI> ptr;
  };
 
@@ -133,7 +143,7 @@ private:
 
 class GeneveHandler {
 public:
-    GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int cacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB = 128, int busyPollUsec = 0);
+    GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB = 128, int busyPollUsec = 0);
     void udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort);
     GeneveHandlerHealthCheck check();
     bool healthy;                  // Updated by check()
@@ -143,7 +153,7 @@ private:
     ghCallback createCallback;
     ghCallback destroyCallback;
     int eniDestroyTimeout;
-    int cacheTimeout;
+    int tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout;
     ThreadConfig tunThreadConfig;
     UDPPacketReceiver udpRcvr;
 

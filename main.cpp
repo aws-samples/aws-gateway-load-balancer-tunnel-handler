@@ -141,7 +141,7 @@ void printHelp(char *progname)
             "  -t TIME    Minimum time in seconds between last packet seen and to consider the tunnel timed out. Set to 0 (the default) to never time out tunnels.\n"
             "             Note the actual time between last packet and the destroy call may be longer than this time.\n"
 #ifndef NO_RETURN_TRAFFIC
-            "  -i TIME    Idle timeout to use for the flow caches. Set this to match what GWLB is configured for. Defaults to 350 seconds.\n"
+            "  -i TIME    Idle timeout for the TCP flow cache. Set this to match what GWLB is configured for. Defaults to 350 seconds. UDP and Other flow caches use a fixed 120 second idle timeout.\n"
 #endif
             "  -p PORT    Listen to TCP port PORT and provide a health status report on it.\n"
             "  -j         For health check detailed statistics, output as JSON instead of text.\n"
@@ -205,7 +205,8 @@ int main(int argc, char *argv[])
 {
     int c;
     int healthCheck = 0, healthSocket = -1;
-    int tunnelTimeout = 0, cacheTimeout = 350;
+    int tunnelTimeout = 0, tcpCacheTimeout = 350;
+    const int udpCacheTimeout = 120, otherCacheTimeout = 120;  // UDP / Other flow-cache idle timeouts (fixed; not CLI-configurable)
     int udpthreads = numCores();
     int rcvBufSizeMB = 128;  // Socket receive buffer size in MB (default 128MB for 50+ Gbps)
     int busyPollUsec = 0;    // SO_BUSY_POLL microseconds per receive (0 = disabled)
@@ -300,7 +301,7 @@ int main(int argc, char *argv[])
                 jsonHealth = true;
                 break;
             case 'i':
-                cacheTimeout = atoi(optarg);
+                tcpCacheTimeout = atoi(optarg);
                 break;
             case '?':
             case 'h':
@@ -370,7 +371,7 @@ int main(int argc, char *argv[])
     tun.cfg.resize(0);
 #endif
 
-    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, cacheTimeout, udp, tun, rcvBufSizeMB, busyPollUsec);
+    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, udp, tun, rcvBufSizeMB, busyPollUsec);
     struct timespec timeout;
     timeout.tv_sec = 1; timeout.tv_nsec = 0;
     fd_set fds;

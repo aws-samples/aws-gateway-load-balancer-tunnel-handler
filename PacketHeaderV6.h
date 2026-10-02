@@ -38,13 +38,15 @@ public:
 
     std::string text() const;
 
+public:
+    uint8_t   prot;    // Inner IP protocol number — public so flow-cache routing can switch on it.
+
 private:
     struct in6_addr src;
     struct in6_addr dst;
     uint32_t  flow;
     uint16_t  srcpt;
     uint16_t  dstpt;
-    uint8_t   prot;
 };
 
 std::ostream &operator<<(std::ostream &os, PacketHeaderV6 const &m);
