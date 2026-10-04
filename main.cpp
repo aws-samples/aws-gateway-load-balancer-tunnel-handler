@@ -69,9 +69,9 @@ void deleteInterfaceCallback(std::string ingressInt, const std::string egressInt
  * @param details true to return packet counters, false to just return the status code.
  * @param gh The GeneveHandler to return the status for.
  * @param s The socket to send the health check to
- * @param json Whether to output as human text (false) or json (true)
+ * @param asJson Whether to output as human text (false) or json (true)
  */
-void performHealthCheck(bool details, GeneveHandler *gh, int s, bool json)
+void performHealthCheck(bool details, GeneveHandler *gh, int s, bool asJson)
 {
     GeneveHandlerHealthCheck ghhc = gh->check();
 
@@ -80,10 +80,10 @@ void performHealthCheck(bool details, GeneveHandler *gh, int s, bool json)
     responseStream << "HTTP/1.1 " << (gh->healthy ? "200 OK" : "503 Service Unavailable") << "\r\n"
                    << "Cache-Control: max-age=0, no-cache\r\n"
                    << "Connection: close\r\n"
-                   << "Content-Type: " << (json ? "application/json" : "text/html") << "\r\n";
+                   << "Content-Type: " << (asJson ? "application/json" : "text/html") << "\r\n";
 
     if (details) {
-        std::string body = json ? ghhc.output_json().dump() :
+        std::string body = asJson ? ghhc.output_json().dump() :
             "<!DOCTYPE html>\n<html lang=\"en-us\">\n<head><title>Health check</title></head><body>" + ghhc.output_str() + "\n</body></html>";
 
         responseStream << "Content-Length: " << body.length() << "\r\n\r\n" << body;

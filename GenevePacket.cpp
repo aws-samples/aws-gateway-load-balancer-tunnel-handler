@@ -73,17 +73,17 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
             break;
         uint16_t optClass = be16toh_unaligned(&pktPtr[0]);
         uint8_t optType = pktPtr[2];
-        uint8_t optLen = (pktPtr[3] & 0x1f) * 4;
+        uint8_t optDataLen = (pktPtr[3] & 0x1f) * 4;
         // The option's declared data length must also fit within the remaining option region,
         // otherwise a malformed/truncated packet could read past it into stale buffer bytes.
-        if(pktPtr + 4 + optLen > pktEnd)
+        if(pktPtr + 4 + optDataLen > pktEnd)
             break;
         unsigned char *optData = &pktPtr[4];
 
         // Check for AWS specific options for GWLB (class 0x108)
         if(__builtin_expect(optClass == 0x108, 1))
         {
-            if(optType == 1 && optLen == 8)
+            if(optType == 1 && optDataLen == 8)
             {
                 // Class 0x0108, type 1: the GWLB endpoint (VPC endpoint, "vpce-")
                 // identifier the flow arrived through -- NOT the ENI of that endpoint.
@@ -91,18 +91,18 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
                 gwlbeEndpointIdValid = true;
                 gwlbeEndpointId = be64toh_unaligned(optData);
             }
-            else if(optType == 2 && optLen == 8)
+            else if(optType == 2 && optDataLen == 8)
             {
                 attachmentIdValid = true;
                 attachmentId = be64toh_unaligned(optData);
             }
-            else if(optType == 3 && optLen == 4)
+            else if(optType == 3 && optDataLen == 4)
             {
                 flowCookieValid = true;
                 flowCookie = be32toh_unaligned(optData);
             }
         }
-        pktPtr += 4 + optLen;
+        pktPtr += 4 + optDataLen;
     }
 
     headerLen = 8 + optLen;
