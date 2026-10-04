@@ -16,6 +16,7 @@
 #include "PacketHeaderV6.h"
 #include "FlowCache.h"
 #include "utils.h"
+#include "GwlbtunConfig.h"
 #include <linux/if.h>     // Needed for IFNAMSIZ define
 #include <boost/unordered/concurrent_flat_map.hpp>
 #include "HealthCheck.h"
@@ -77,7 +78,7 @@ private:
 
 class GeneveHandlerENI {
 public:
-    GeneveHandlerENI(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
+    GeneveHandlerENI(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, const ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
     ~GeneveHandlerENI();
     void udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssize_t pktlen) __attribute__((hot));
     void tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));
@@ -125,7 +126,7 @@ private:
   */
  class GeneveHandlerENIPtr {
  public:
-    GeneveHandlerENIPtr(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
+    GeneveHandlerENIPtr(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, const ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback);
     std::shared_ptr<GeneveHandlerENI> ptr;
  };
 
@@ -143,7 +144,7 @@ private:
 
 class GeneveHandler {
 public:
-    GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB = 128, int busyPollUsec = 0);
+    GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, const GwlbtunConfig& cfg);
     void udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort);
     GeneveHandlerHealthCheck check();
     bool healthy;                  // Updated by check()
@@ -152,9 +153,7 @@ private:
     boost::concurrent_flat_map<gwlbeid_t, GeneveHandlerENIPtr> eniHandlers;
     ghCallback createCallback;
     ghCallback destroyCallback;
-    int eniDestroyTimeout;
-    int tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout;
-    ThreadConfig tunThreadConfig;
+    const GwlbtunConfig config;
     UDPPacketReceiver udpRcvr;
 
     // Thread-local fast-path cache: per-thread weak references to ENI handlers, keyed by this instance

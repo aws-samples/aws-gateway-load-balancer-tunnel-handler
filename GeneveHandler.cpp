@@ -59,20 +59,15 @@ std::string GwlbData::text()
  *
  * @param createCallback Function to call when a new endpoint is seen.
  * @param destroyCallback Function to call when an endpoint has gone away and we need to clean up.
- * @param destroyTimeout How long to wait for an endpoint to be idle before calling destroyCallback.
- * @param cacheTimeout Timeout for flow cache entries.
- * @param udpThreads Thread configuration for UDP receiver threads.
- * @param tunThreads Thread configuration for TUN interface threads.
- * @param rcvBufSizeMB Socket receive buffer size in megabytes (default 128MB).
+ * @param cfg Immutable runtime configuration (timeouts, thread configs, socket buffer, busy-poll).
  */
-GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, int destroyTimeout, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig udpThreads, ThreadConfig tunThreads, int rcvBufSizeMB, int busyPollUsec)
+GeneveHandler::GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, const GwlbtunConfig& cfg)
         : healthy(true),
-          createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)), eniDestroyTimeout(destroyTimeout),
-          tcpCacheTimeout(tcpCacheTimeout), udpCacheTimeout(udpCacheTimeout), otherCacheTimeout(otherCacheTimeout),
-          tunThreadConfig(std::move(tunThreads))
+          createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback)),
+          config(cfg)
 {
     // Set up UDP receiver threads.
-    udpRcvr.setup(udpThreads, GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6), rcvBufSizeMB, busyPollUsec);
+    udpRcvr.setup(config.udpThreads, GENEVE_PORT, std::bind(&GeneveHandler::udpReceiverCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5, std::placeholders::_6), config.rcvBufSizeMB, config.busyPollUsec);
 }
 
 /**
@@ -150,8 +145,8 @@ GeneveHandlerHealthCheck GeneveHandler::check()
     std::list<GeneveHandlerENIHealthCheck> enis;
 
     // Clean up any ENI handlers that have apparently gone idle, if we're not keeping them around forever.
-    if(eniDestroyTimeout > 0)
-        eniHandlers.erase_if([&](auto& eniHandler) { return (*eniHandler.second.ptr).hasGoneIdle(eniDestroyTimeout); });
+    if(config.tunnelTimeout > 0)
+        eniHandlers.erase_if([&](auto& eniHandler) { return (*eniHandler.second.ptr).hasGoneIdle(config.tunnelTimeout); });
 
     // Check remaining handlers.
     eniHandlers.visit_all([&enis](auto& eniHandler) { enis.push_back( (*eniHandler.second.ptr).check() );  ; });
@@ -220,7 +215,7 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
         auto cb = [&](const auto& eniHandler) {
             resolvedHandler = eniHandler.second.ptr;
         };
-        if(eniHandlers.try_emplace_or_cvisit(gwlbeEndpointId, gwlbeEndpointId, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, tunThreadConfig, createCallback, destroyCallback, cb))
+        if(eniHandlers.try_emplace_or_cvisit(gwlbeEndpointId, gwlbeEndpointId, config.tcpCacheTimeout, config.udpCacheTimeout, config.otherCacheTimeout, config.tunThreads, createCallback, destroyCallback, cb))
         {
             // We did a create - redo the visit to capture ptr
             eniHandlers.cvisit(gwlbeEndpointId, cb);
@@ -242,7 +237,7 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
  * GeneveHandlerENI handles all aspects of handling for a given ENI. It is separated out this way to make dealing with
  * keeping all the resources needed on a per ENI basis easier.
  */
-GeneveHandlerENI::GeneveHandlerENI(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback) :
+GeneveHandlerENI::GeneveHandlerENI(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, const ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback) :
         eni(eni), eniStr(MakeGwlbeStr(eni)), tcpCacheTimeout(tcpCacheTimeout), udpCacheTimeout(udpCacheTimeout), otherCacheTimeout(otherCacheTimeout),
         devInName(devname_make(eni, true)),
 #ifndef NO_RETURN_TRAFFIC
@@ -543,7 +538,7 @@ bool GeneveHandlerENI::hasGoneIdle(int timeout)
 /**
  * GeneveHandlerENI shared pointer wrapper class
  */
-GeneveHandlerENIPtr::GeneveHandlerENIPtr(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig &tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback)
+GeneveHandlerENIPtr::GeneveHandlerENIPtr(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, const ThreadConfig &tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback)
 {
     ptr = std::make_shared<GeneveHandlerENI>(eni, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, tunThreadConfig, createCallback, destroyCallback);
 }

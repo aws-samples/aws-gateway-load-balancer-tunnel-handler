@@ -8,6 +8,7 @@
 #include <getopt.h>
 #include <sys/socket.h>
 #include "GeneveHandler.h"
+#include "GwlbtunConfig.h"
 #include <cstdlib>
 #include <sstream>
 #include <fstream>
@@ -371,7 +372,8 @@ int main(int argc, char *argv[])
     tun.cfg.resize(0);
 #endif
 
-    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, udp, tun, rcvBufSizeMB, busyPollUsec);
+    const GwlbtunConfig cfg{ tunnelTimeout, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, udp, tun, rcvBufSizeMB, busyPollUsec };
+    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, cfg);
     struct timespec timeout;
     timeout.tv_sec = 1; timeout.tv_nsec = 0;
     fd_set fds;
