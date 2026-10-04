@@ -69,7 +69,7 @@ template<class V> FlowCacheEntry<V>::FlowCacheEntry(V entrydata) :
  */
 template <class K, class V> class FlowCache {
 public:
-    FlowCache(std::string cacheName, int cacheTimeout);
+    FlowCache(std::string cacheName, int cacheTimeout, std::size_t reserve = 0);
     std::optional<V> lookup(K key);
     bool insert(K key, V value);
     FlowCacheHealthCheck stats() const;
@@ -85,9 +85,10 @@ private:
  * @param cacheName Human name of this cache, used for diagnostic outputs.
  */
 template<class K, class V>
-FlowCache<K, V>::FlowCache(std::string cacheName, int cacheTimeout) :
+FlowCache<K, V>::FlowCache(std::string cacheName, int cacheTimeout, std::size_t reserve) :
          cacheTimeout(cacheTimeout), cacheName(std::move(cacheName))
 {
+    if(reserve > 0) cache.reserve(reserve);
 }
 
 /**

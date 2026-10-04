@@ -4,7 +4,10 @@
 #ifndef GWLBTUN_GWLBTUNCONFIG_H
 #define GWLBTUN_GWLBTUNCONFIG_H
 
-#include "utils.h"   // ThreadConfig
+#include "utils.h"   // ThreadConfig, gwlbeid_t
+#include <array>
+#include <cstddef>
+#include <unordered_map>
 
 /**
  * Runtime configuration for gwlbtun. Populated once from the command line in
@@ -22,6 +25,18 @@ struct GwlbtunConfig {
     ThreadConfig tunThreads;        // TUN return-path thread/affinity config
     int rcvBufSizeMB = 128;         // UDP socket receive buffer size (MB)
     int busyPollUsec = 0;           // SO_BUSY_POLL microseconds per receive (0 = disabled)
+
+    // Flow-cache reserve (entries) per protocol cache, in health-output order:
+    // [v4TCP, v4UDP, v4Other, v6TCP, v6UDP, v6Other]. 0 = don't pre-size that cache.
+    std::array<std::size_t, 6> defaultReserve{16384, 16384, 1024, 1024, 1024, 1024};
+    // Optional per-GWLB-endpoint overrides, keyed by endpoint (vpce-) id.
+    std::unordered_map<gwlbeid_t, std::array<std::size_t, 6>> perEndpointReserve;
+
+    // Reserve vector for a given endpoint: its override if present, else the default.
+    const std::array<std::size_t, 6>& reserveFor(gwlbeid_t id) const {
+        auto it = perEndpointReserve.find(id);
+        return it != perEndpointReserve.end() ? it->second : defaultReserve;
+    }
 };
 
 #endif //GWLBTUN_GWLBTUNCONFIG_H

@@ -11,6 +11,7 @@
 #include "GwlbtunConfig.h"
 #include <thread>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <sstream>
 #include <fstream>
@@ -164,6 +165,11 @@ void printHelp(char *progname)
             "                           For 50+ Gbps throughput, use 128-256MB. Requires net.core.rmem_max sysctl >= SIZE*1024*1024.\n"
             "  --busypoll USEC          Busy-poll the NIC up to USEC microseconds per receive (lower latency, higher CPU).\n"
             "                           Default 0 (disabled). Try 50 for latency-sensitive high packet rates.\n"
+            "  --reserve RESV           Pre-size the flow caches to avoid rehash stalls under high flow counts.\n"
+            "                           RESV is six comma-separated entry counts in order v4TCP,v4UDP,v4Other,v6TCP,v6UDP,v6Other\n"
+            "                           (0 = don't pre-size that cache). Default 16384,16384,1024,1024,1024,1024.\n"
+            "                           Prefix with 'vpce-<id>:' to override a specific GWLB endpoint; repeat for several.\n"
+            "                           e.g. --reserve 5000000,50000,50000,20,20,20 --reserve vpce-0abc...:2000000,2000000,1024,1024,1024,1024\n"
             "\n"
             "AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.\n"
             "It is recommended to have the same number of UDP threads as tunnel processor threads, in one-arm operation.\n"
@@ -202,6 +208,42 @@ void shutdownHandler(int)
     keepRunning = 0;
 }
 
+// Parse one --reserve value: "n,n,n,n,n,n" (global default) or
+// "vpce-<hex>:n,n,n,n,n,n" (per-endpoint override). Order is
+// [v4TCP,v4UDP,v4Other,v6TCP,v6UDP,v6Other]. Returns false on malformed input.
+static bool parseReserve(const std::string& arg, bool& isGlobal, gwlbeid_t& key, std::array<std::size_t,6>& out)
+{
+    std::string nums = arg;
+    isGlobal = true; key = 0;
+    auto colon = arg.find(':');
+    if(colon != std::string::npos)
+    {
+        std::string k = arg.substr(0, colon);
+        nums = arg.substr(colon + 1);
+        if(k.rfind("vpce-", 0) == 0) k = k.substr(5);
+        else if(k.rfind("eni-", 0) == 0) k = k.substr(4);
+        if(k.empty()) return false;
+        try { key = std::stoull(k, nullptr, 16); } catch(...) { return false; }
+        isGlobal = false;
+    }
+    std::array<std::size_t,6> vals{};
+    std::size_t idx = 0, start = 0;
+    for(std::size_t i = 0; i <= nums.size(); i++)
+    {
+        if(i == nums.size() || nums[i] == ',')
+        {
+            if(idx >= 6) return false;
+            std::string tok = nums.substr(start, i - start);
+            if(tok.empty()) return false;
+            try { vals[idx] = std::stoull(tok); } catch(...) { return false; }
+            idx++; start = i + 1;
+        }
+    }
+    if(idx != 6) return false;
+    out = vals;
+    return true;
+}
+
 class Logger *logger;
 
 int main(int argc, char *argv[])
@@ -213,12 +255,22 @@ int main(int argc, char *argv[])
     int udpthreads = numCores();
     int rcvBufSizeMB = 128;  // Socket receive buffer size in MB (default 128MB for 50+ Gbps)
     int busyPollUsec = 0;    // SO_BUSY_POLL microseconds per receive (0 = disabled)
+    std::array<std::size_t,6> defaultReserve{16384, 16384, 1024, 1024, 1024, 1024};  // flow-cache pre-size (entries) per cache
+    std::unordered_map<gwlbeid_t, std::array<std::size_t,6>> perEndpointReserve;      // optional per-vpce overrides
 #ifndef NO_RETURN_TRAFFIC
     int tunthreads = numCores();
 #endif
     std::string udpaffinity, tunaffinity, logoptions;
     bool detailedHealth = true, printHelpFlag = false, jsonHealth = false;
 
+    // Long options without a short-option equivalent are identified by a unique
+    // value (>= 256, so they can't collide with an ASCII short option) and
+    // switched on directly below. This avoids fragile array-index tracking that
+    // silently misroutes options when the list is edited or between build variants.
+    enum {
+        OPT_UDPTHREADS = 256, OPT_UDPAFFINITY, OPT_LOGGING,
+        OPT_TUNTHREADS, OPT_TUNAFFINITY, OPT_RCVBUF, OPT_BUSYPOLL, OPT_RESERVE
+    };
     static struct option long_options[] = {
             {"cmdnew", required_argument, NULL, 'c'},
             {"cmddel", required_argument, NULL, 'r'},
@@ -227,61 +279,48 @@ int main(int argc, char *argv[])
             {"debug", no_argument, NULL, 'd'},
             {"help", no_argument, NULL, 'h'},
             {"help", no_argument, NULL, '?'},
-            {"udpthreads", required_argument, NULL, 0},    // optind 7
-            {"udpaffinity", required_argument, NULL, 0},   // optind 8
-            {"logging", required_argument, NULL, 0},       // optind 9
-            {"json", no_argument, NULL, 'j'},              // optind 10
-            {"idle", required_argument, NULL, 'i'},        // optind 11
+            {"udpthreads", required_argument, NULL, OPT_UDPTHREADS},
+            {"udpaffinity", required_argument, NULL, OPT_UDPAFFINITY},
+            {"logging", required_argument, NULL, OPT_LOGGING},
+            {"json", no_argument, NULL, 'j'},
+            {"idle", required_argument, NULL, 'i'},
 #ifndef NO_RETURN_TRAFFIC
-            {"tunthreads", required_argument, NULL, 0},    // optind 12
-            {"tunaffinity", required_argument, NULL, 0},   // optind 13
+            {"tunthreads", required_argument, NULL, OPT_TUNTHREADS},
+            {"tunaffinity", required_argument, NULL, OPT_TUNAFFINITY},
 #endif
-            {"rcvbuf", required_argument, NULL, 0},        // optind 14 (or 12 in NO_RETURN_TRAFFIC mode)
-            {"busypoll", required_argument, NULL, 0},      // optind 15 (or 13 in NO_RETURN_TRAFFIC mode)
+            {"rcvbuf", required_argument, NULL, OPT_RCVBUF},
+            {"busypoll", required_argument, NULL, OPT_BUSYPOLL},
+            {"reserve", required_argument, NULL, OPT_RESERVE},
             {0, 0, 0, 0}
     };
 
     // Argument parsing
-    int optind;
-    while ((c = getopt_long (argc, argv, "h?djxc:r:t:p:si:", long_options, &optind)) != -1)
+    while ((c = getopt_long (argc, argv, "h?djxc:r:t:p:si:", long_options, NULL)) != -1)
     {
         switch(c)
         {
-            case 0:
-                // Long option
-                switch(optind) {
-                    case 7:
-                        udpthreads = atoi(optarg);
-                        break;
-                    case 8:
-                        udpaffinity = std::string(optarg);
-                        break;
-                    case 9:
-                        logoptions = std::string(optarg);
-                        break;
+            case OPT_UDPTHREADS:  udpthreads = atoi(optarg); break;
+            case OPT_UDPAFFINITY: udpaffinity = std::string(optarg); break;
+            case OPT_LOGGING:     logoptions = std::string(optarg); break;
 #ifndef NO_RETURN_TRAFFIC
-                    case 12:
-                        tunthreads = atoi(optarg);
-                        break;
-                    case 13:
-                        tunaffinity = std::string(optarg);
-                        break;
-                    case 14:
-                        rcvBufSizeMB = atoi(optarg);
-                        break;
-                    case 15:
-                        busyPollUsec = atoi(optarg);
-                        break;
-#else
-                    case 12:
-                        rcvBufSizeMB = atoi(optarg);
-                        break;
-                    case 13:
-                        busyPollUsec = atoi(optarg);
-                        break;
+            case OPT_TUNTHREADS:  tunthreads = atoi(optarg); break;
+            case OPT_TUNAFFINITY: tunaffinity = std::string(optarg); break;
 #endif
+            case OPT_RCVBUF:      rcvBufSizeMB = atoi(optarg); break;
+            case OPT_BUSYPOLL:    busyPollUsec = atoi(optarg); break;
+            case OPT_RESERVE:
+            {
+                bool isGlobal; gwlbeid_t key; std::array<std::size_t,6> vals;
+                if(!parseReserve(optarg, isGlobal, key, vals)) {
+                    fprintf(stderr, "Invalid --reserve '%s'. Expected six comma-separated counts "
+                            "(v4TCP,v4UDP,v4Other,v6TCP,v6UDP,v6Other), optionally prefixed with "
+                            "'vpce-<id>:' for a per-endpoint override.\n", optarg);
+                    exit(EXIT_FAILURE);
                 }
+                if(isGlobal) defaultReserve = vals;
+                else perEndpointReserve[key] = vals;
                 break;
+            }
             case 'c':
                 newCmd = std::string(optarg);
                 break;
@@ -375,13 +414,19 @@ int main(int argc, char *argv[])
 #endif
 
     initCoarseClock();
-    const GwlbtunConfig cfg{ tunnelTimeout, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, udp, tun, rcvBufSizeMB, busyPollUsec };
+    const GwlbtunConfig cfg{ tunnelTimeout, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, udp, tun, rcvBufSizeMB, busyPollUsec, defaultReserve, std::move(perEndpointReserve) };
     auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, cfg);
     struct timespec timeout;
     timeout.tv_sec = 1; timeout.tv_nsec = 0;
     fd_set fds;
     int ready;
     LOG(LS_CORE, LL_IMPORTANT, "AWS Gateway Load Balancer Tunnel Handler v%d.%d (%s) built %s", VERSION_MAJOR, VERSION_MINOR, GIT_DESCRIBE, BUILD_TIMESTAMP);
+
+    LOG(LS_CORE, LL_IMPORTANT, "Flow-cache reserve (default, entries): v4[tcp=%zu udp=%zu other=%zu] v6[tcp=%zu udp=%zu other=%zu]",
+        cfg.defaultReserve[0], cfg.defaultReserve[1], cfg.defaultReserve[2], cfg.defaultReserve[3], cfg.defaultReserve[4], cfg.defaultReserve[5]);
+    for(const auto& kv : cfg.perEndpointReserve)
+        LOG(LS_CORE, LL_IMPORTANT, "Flow-cache reserve (vpce-%s): v4[tcp=%zu udp=%zu other=%zu] v6[tcp=%zu udp=%zu other=%zu]",
+            MakeGwlbeStr(kv.first).c_str(), kv.second[0], kv.second[1], kv.second[2], kv.second[3], kv.second[4], kv.second[5]);
 
     // Flow-cache expiry + idle-ENI reap run on a dedicated reaper thread so the
     // O(N) scan never stalls the main loop's health accept. Wakes every second
