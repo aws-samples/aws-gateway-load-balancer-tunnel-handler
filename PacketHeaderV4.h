@@ -24,12 +24,10 @@ public:
     */
     bool operator==(const PacketHeaderV4 &ph) const
     {
-    #ifdef HASH_IS_SYMMETRICAL
+        // Bidirectional: a flow and its reverse compare equal (depends on the
+        // symmetric hash invariant in utils.h).
         return prot == ph.prot && ((src == ph.src && dst == ph.dst && srcpt == ph.srcpt && dstpt == ph.dstpt) ||
-                                (src == ph.dst && dst == ph.src && srcpt == ph.dstpt && dstpt == ph.srcpt));
-    #else
-        return prot == ph.prot && src == ph.src && dst == ph.dst && srcpt == ph.srcpt && dstpt == ph.dstpt;
-    #endif
+                                   (src == ph.dst && dst == ph.src && srcpt == ph.dstpt && dstpt == ph.srcpt));
     }
 
     /**

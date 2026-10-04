@@ -16,14 +16,11 @@ public:
     
     bool operator==(const PacketHeaderV6 &ph) const
     {
-    #ifdef HASH_IS_SYMMETRICAL
+        // Bidirectional: a flow and its reverse compare equal (depends on the
+        // symmetric hash invariant in utils.h).
         return prot == ph.prot &&
             ((srcpt == ph.srcpt && dstpt == ph.dstpt && !memcmp(&src, &ph.src, sizeof(struct in6_addr)) && !memcmp(&dst, &ph.dst, sizeof(struct in6_addr))) ||
-                (srcpt == ph.dstpt && dstpt == ph.srcpt && !memcmp(&src, &ph.dst, sizeof(struct in6_addr)) && !memcmp(&dst, &ph.src, sizeof(struct in6_addr))));
-    #else
-        return prot == ph.prot &&  srcpt == ph.srcpt && dstpt == ph.dstpt &&
-            !memcmp(&src, &ph.src, sizeof(struct in6_addr)) && !memcmp(&dst, &ph.dst, sizeof(struct in6_addr));
-    #endif
+             (srcpt == ph.dstpt && dstpt == ph.srcpt && !memcmp(&src, &ph.dst, sizeof(struct in6_addr)) && !memcmp(&dst, &ph.src, sizeof(struct in6_addr))));
     }
 
     /**

@@ -77,12 +77,13 @@ void initCoarseClock();      // Record the start reference; call once at startup
 void updateCoarseClock();    // Refresh g_coarseSec from kernel time; call ~1/s.
 inline uint32_t coarseTime() { return g_coarseSec.load(std::memory_order_relaxed); }
 
-// If hashFunc is a function that does not result in the same hash for both flow directions,
-// #undef the next line so that GeneveHandler and PacketHeader changes their logic appropriately.
-#define HASH_IS_SYMMETRICAL
+// INVARIANT: hashFunc MUST return the same hash for both directions of a flow
+// (src/dst and port swap), and PacketHeaderV4/V6::operator== relies on that
+// symmetry (it treats a flow and its reverse as equal). GWLB guarantees the
+// per-flow cookie is identical in both directions, so this invariant is permanent.
+// Do not introduce a direction-dependent hash here.
 /**
- * Simple, basic, but very fast hash function.  Returns same hash in both directions, so leave HASH_IS_SYMMETRICAL
- * defined.
+ * Simple, basic, but very fast hash function.  Returns same hash in both directions.
  * @param prot    Protocol number
  * @param srcip   Pointer to source IP data
  * @param dstip   Pointer to destination IP data
