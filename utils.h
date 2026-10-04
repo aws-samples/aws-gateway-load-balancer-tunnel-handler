@@ -14,6 +14,8 @@
 #include <chrono>
 #include <vector>
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include "GenevePacket.h"   // For gwlbeid_t
 
 using namespace std::string_literals;
@@ -48,6 +50,16 @@ std::string sockaddrToName(struct sockaddr *sa);
 void ParseThreadConfiguration(int threadcount, std::string& affinity, ThreadConfig *dest);
 std::string MakeGwlbeStr(gwlbeid_t eni);
 int FindIndexOf(std::vector<std::string> vector, std::string search);
+
+// Coarse monotonic clock: whole seconds since process start, updated roughly
+// once per second from the main loop. Lets hot paths stamp/compare times without
+// a per-packet clock syscall. Reads real kernel time (not a tick counter) so it
+// stays accurate if the loop wakes irregularly, and uses a boottime-style source
+// so elapsed time keeps advancing across a system suspend.
+extern std::atomic<uint32_t> g_coarseSec;
+void initCoarseClock();      // Record the start reference; call once at startup.
+void updateCoarseClock();    // Refresh g_coarseSec from kernel time; call ~1/s.
+inline uint32_t coarseTime() { return g_coarseSec.load(std::memory_order_relaxed); }
 
 // If hashFunc is a function that does not result in the same hash for both flow directions,
 // #undef the next line so that GeneveHandler and PacketHeader changes their logic appropriately.

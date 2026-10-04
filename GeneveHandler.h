@@ -37,6 +37,12 @@ public:
     uint16_t srcPort;
     uint16_t dstPort;
 
+    bool operator==(const GwlbData& o) const {
+        return srcPort == o.srcPort && dstPort == o.dstPort &&
+               srcAddr.s_addr == o.srcAddr.s_addr && dstAddr.s_addr == o.dstAddr.s_addr &&
+               header == o.header;
+    }
+
     std::string text();
 };
 
@@ -83,6 +89,7 @@ public:
     void udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssize_t pktlen) __attribute__((hot));
     void tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));
     GeneveHandlerENIHealthCheck check();
+    void sweepCaches();      // evict expired flow-cache entries (off the health path)
     bool hasGoneIdle(int timeout);
 
 private:
@@ -147,6 +154,7 @@ public:
     GeneveHandler(ghCallback createCallback, ghCallback destroyCallback, const GwlbtunConfig& cfg);
     void udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, struct in_addr *srcAddr, uint16_t srcPort, struct in_addr *dstAddr, uint16_t dstPort);
     GeneveHandlerHealthCheck check();
+    void sweep();            // evict expired flow entries + reap idle ENIs (periodic)
     bool healthy;                  // Updated by check()
 
 private:

@@ -144,12 +144,8 @@ GeneveHandlerHealthCheck GeneveHandler::check()
 
     std::list<GeneveHandlerENIHealthCheck> enis;
 
-    // Clean up any ENI handlers that have apparently gone idle, if we're not keeping them around forever.
-    if(config.tunnelTimeout > 0)
-        eniHandlers.erase_if([&](auto& eniHandler) { return (*eniHandler.second.ptr).hasGoneIdle(config.tunnelTimeout); });
-
-    // Check remaining handlers.
-    eniHandlers.visit_all([&enis](auto& eniHandler) { enis.push_back( (*eniHandler.second.ptr).check() );  ; });
+    // Report-only: no eviction here (see sweep()).
+    eniHandlers.visit_all([&enis](auto& eniHandler) { enis.push_back( (*eniHandler.second.ptr).check() ); });
 
     // Aggregate overall health: UDP receiver threads plus every ENI's tunnel threads. Previously
     // this->healthy was never written, so main.cpp's health endpoint always reported 200 OK.
@@ -160,6 +156,16 @@ GeneveHandlerHealthCheck GeneveHandler::check()
     this->healthy = udpRcvr.healthCheck() && enisHealthy;
 
     return { this->healthy, udpRcvr.status(), enis };
+}
+
+void GeneveHandler::sweep()
+{
+    // Evict expired flow-cache entries, then reap ENI handlers idle past the
+    // tunnel timeout. Decoupled from check()/health reporting so a health poll
+    // never triggers the O(N) cache scan.
+    eniHandlers.visit_all([](auto& eniHandler) { (*eniHandler.second.ptr).sweepCaches(); });
+    if(config.tunnelTimeout > 0)
+        eniHandlers.erase_if([&](auto& eniHandler) { return (*eniHandler.second.ptr).hasGoneIdle(config.tunnelTimeout); });
 }
 
 /**
@@ -318,36 +324,36 @@ void GeneveHandlerENI::tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen
             case 4:
             {
                 auto ph = PacketHeaderV4(pktbuf, pktlen);
-                try {
-                    switch(ph.prot)
-                    {
-                        case IPPROTO_TCP: gd = gwlbV4CookiesTcp.lookup(ph); break;
-                        case IPPROTO_UDP: gd = gwlbV4CookiesUdp.lookup(ph); break;
-                        default:          gd = gwlbV4CookiesOther.lookup(ph); break;
-                    }
+                std::optional<GwlbData> found;
+                switch(ph.prot)
+                {
+                    case IPPROTO_TCP: found = gwlbV4CookiesTcp.lookup(ph); break;
+                    case IPPROTO_UDP: found = gwlbV4CookiesUdp.lookup(ph); break;
+                    default:          found = gwlbV4CookiesOther.lookup(ph); break;
                 }
-                catch (std::invalid_argument &e) {
+                if(!found) {
                     LOG(LS_TUNNEL, LL_DEBUG, "Flow " + ph.text() + " has not been seen coming in from GWLB - dropping.  (Remember - GWLB is for inline inspection only - you cannot source new flows from this device into it.)");
                     return;
                 }
+                gd = std::move(*found);
                 LOG(LS_TUNNEL, LL_DEBUGDETAIL, "Resolved packet header " + ph.text() + " to options " + gd.text());
                 break;
             }
             case 6:
             {
                 auto ph = PacketHeaderV6(pktbuf, pktlen);
-                try {
-                    switch(ph.prot)
-                    {
-                        case IPPROTO_TCP: gd = gwlbV6CookiesTcp.lookup(ph); break;
-                        case IPPROTO_UDP: gd = gwlbV6CookiesUdp.lookup(ph); break;
-                        default:          gd = gwlbV6CookiesOther.lookup(ph); break;
-                    }
+                std::optional<GwlbData> found;
+                switch(ph.prot)
+                {
+                    case IPPROTO_TCP: found = gwlbV6CookiesTcp.lookup(ph); break;
+                    case IPPROTO_UDP: found = gwlbV6CookiesUdp.lookup(ph); break;
+                    default:          found = gwlbV6CookiesOther.lookup(ph); break;
                 }
-                catch (std::invalid_argument &e) {
+                if(!found) {
                     LOG(LS_TUNNEL, LL_DEBUG, "Flow " + ph.text() + " has not been seen coming in from GWLB - dropping.  (Remember - GWLB is for inline inspection only - you cannot source new flows from this device into it.)");
                     return;
                 }
+                gd = std::move(*found);
                 LOG(LS_TUNNEL, LL_DEBUGDETAIL, "Resolved packet header " + ph.text() + " to options " + gd.text());
                 break;
             }
@@ -382,6 +388,17 @@ void GeneveHandlerENI::tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen
  * @param pkt The packet received.
  * @param pktlen Length of packet received.
  */
+// Rate-limited notice for the rare case where an established flow's stored GWLB
+// cookie changes (e.g. GWLB re-balanced the flow). Logs the first occurrence and
+// then every 4096th, so a genuine problem is visible without flooding.
+static void logCookieChanged(const std::string& eniStr)
+{
+    static std::atomic<uint64_t> n{0};
+    uint64_t c = n.fetch_add(1, std::memory_order_relaxed);
+    if((c & 0xFFF) == 0)
+        LOG(LS_UDP, LL_IMPORTANT, "GWLB flow cookie changed for an established flow on GWLBe vpce-" + eniStr + " (occurrences=" + std::to_string(c + 1) + "). Usually benign; investigate if frequent (e.g. a gwlbtun/GWLB idle-timeout mismatch).");
+}
+
 void GeneveHandlerENI::udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssize_t pktlen)
 {
     auto headerLen = gd.header.size();
@@ -393,26 +410,32 @@ void GeneveHandlerENI::udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssiz
             {
 #ifndef NO_RETURN_TRAFFIC
                 auto ph = PacketHeaderV4(pkt + headerLen, pktlen - headerLen);
-                // Ensure flow is in the matching per-protocol flow cache.
+                // Insert the flow if new, otherwise just refresh its idle timer.
+                bool cookieChanged = false;
                 switch(ph.prot)
                 {
-                    case IPPROTO_TCP: gwlbV4CookiesTcp.insert(std::move(ph), std::move(gd)); break;
-                    case IPPROTO_UDP: gwlbV4CookiesUdp.insert(std::move(ph), std::move(gd)); break;
-                    default:          gwlbV4CookiesOther.insert(std::move(ph), std::move(gd)); break;
+                    case IPPROTO_TCP: cookieChanged = gwlbV4CookiesTcp.insert(std::move(ph), std::move(gd)); break;
+                    case IPPROTO_UDP: cookieChanged = gwlbV4CookiesUdp.insert(std::move(ph), std::move(gd)); break;
+                    default:          cookieChanged = gwlbV4CookiesOther.insert(std::move(ph), std::move(gd)); break;
                 }
+                if(__builtin_expect(cookieChanged, 0))
+                    logCookieChanged(eniStr);
 #endif
                 // Route the decap'ed packet to our tun interface, accounting for drops.
                 writeToTun(pkt + headerLen, pktlen - headerLen);
             } else if(__builtin_expect(iph->ip_v == (unsigned int)6, 0)) {
 #ifndef NO_RETURN_TRAFFIC
                 auto ph = PacketHeaderV6(pkt + headerLen, pktlen - headerLen);
-                // Ensure flow is in the matching per-protocol flow cache.
+                // Insert the flow if new, otherwise just refresh its idle timer.
+                bool cookieChanged = false;
                 switch(ph.prot)
                 {
-                    case IPPROTO_TCP: gwlbV6CookiesTcp.insert(std::move(ph), std::move(gd)); break;
-                    case IPPROTO_UDP: gwlbV6CookiesUdp.insert(std::move(ph), std::move(gd)); break;
-                    default:          gwlbV6CookiesOther.insert(std::move(ph), std::move(gd)); break;
+                    case IPPROTO_TCP: cookieChanged = gwlbV6CookiesTcp.insert(std::move(ph), std::move(gd)); break;
+                    case IPPROTO_UDP: cookieChanged = gwlbV6CookiesUdp.insert(std::move(ph), std::move(gd)); break;
+                    default:          cookieChanged = gwlbV6CookiesOther.insert(std::move(ph), std::move(gd)); break;
                 }
+                if(__builtin_expect(cookieChanged, 0))
+                    logCookieChanged(eniStr);
 #endif
                 // Route the decap'ed packet to our tun interface, accounting for drops.
                 writeToTun(pkt + headerLen, pktlen - headerLen);
@@ -512,10 +535,18 @@ GeneveHandlerENIHealthCheck GeneveHandlerENI::check()
     return { healthy, eniStr, pktsOut.load(), bytesOut.load(), pktsDropped.load(), lastPacketOut.load(), tunnelIn->status()
 #ifndef NO_RETURN_TRAFFIC
              , tunnelOut->status(),
-             gwlbV4CookiesTcp.check(), gwlbV4CookiesUdp.check(), gwlbV4CookiesOther.check(),
-             gwlbV6CookiesTcp.check(), gwlbV6CookiesUdp.check(), gwlbV6CookiesOther.check()
+             gwlbV4CookiesTcp.stats(), gwlbV4CookiesUdp.stats(), gwlbV4CookiesOther.stats(),
+             gwlbV6CookiesTcp.stats(), gwlbV6CookiesUdp.stats(), gwlbV6CookiesOther.stats()
 #endif
     };
+}
+
+void GeneveHandlerENI::sweepCaches()
+{
+#ifndef NO_RETURN_TRAFFIC
+    gwlbV4CookiesTcp.sweep(); gwlbV4CookiesUdp.sweep(); gwlbV4CookiesOther.sweep();
+    gwlbV6CookiesTcp.sweep(); gwlbV6CookiesUdp.sweep(); gwlbV6CookiesOther.sweep();
+#endif
 }
 
 /**

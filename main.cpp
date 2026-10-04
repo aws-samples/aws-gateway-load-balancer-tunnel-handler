@@ -9,6 +9,8 @@
 #include <sys/socket.h>
 #include "GeneveHandler.h"
 #include "GwlbtunConfig.h"
+#include <thread>
+#include <chrono>
 #include <cstdlib>
 #include <sstream>
 #include <fstream>
@@ -372,16 +374,29 @@ int main(int argc, char *argv[])
     tun.cfg.resize(0);
 #endif
 
+    initCoarseClock();
     const GwlbtunConfig cfg{ tunnelTimeout, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, udp, tun, rcvBufSizeMB, busyPollUsec };
     auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, cfg);
     struct timespec timeout;
     timeout.tv_sec = 1; timeout.tv_nsec = 0;
     fd_set fds;
     int ready;
-    int ticksSinceCheck = 60;
     LOG(LS_CORE, LL_IMPORTANT, "AWS Gateway Load Balancer Tunnel Handler v%d.%d (%s) built %s", VERSION_MAJOR, VERSION_MINOR, GIT_DESCRIBE, BUILD_TIMESTAMP);
+
+    // Flow-cache expiry + idle-ENI reap run on a dedicated reaper thread so the
+    // O(N) scan never stalls the main loop's health accept. Wakes every second
+    // and sweeps every ~60s; exits within a second of shutdown.
+    std::thread reaper([gh]() {
+        int t = 0;
+        while(keepRunning) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if(++t >= 60) { t = 0; gh->sweep(); }
+        }
+    });
+
     while(keepRunning)
     {
+        updateCoarseClock();
         FD_ZERO(&fds);
         if(healthCheck > 0)
         {
@@ -409,20 +424,12 @@ int main(int argc, char *argv[])
                     throw;
                 }
             }
-            ticksSinceCheck = 60;
-        }
-
-        ticksSinceCheck --;
-        if(ticksSinceCheck < 0)
-        {
-            GeneveHandlerHealthCheck ghhc = gh->check();
-            LOG(LS_HEALTHCHECK, LL_DEBUG, ghhc.output_str());
-            ticksSinceCheck = 60;
         }
     }
 
     // The loop was interrupted (most likely by Ctrl-C or likewise).  Clean up a few things.
     LOG(LS_CORE, LL_IMPORTANT, "Shutting down.");
+    if(reaper.joinable()) reaper.join();
     delete(gh);
     if(healthCheck > 0) close(healthSocket);
     LOG(LS_CORE, LL_IMPORTANT, "Shutdown complete.");

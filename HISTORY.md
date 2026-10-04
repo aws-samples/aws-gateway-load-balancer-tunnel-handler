@@ -3,6 +3,7 @@
 - recvmmsg() batch receive on the UDP ingress path, configurable SO_RCVBUF, and reduced shutdown latency for higher throughput (#21, thanks @nikvouk-aws).
 - Container image and Kubernetes DaemonSet manifest (#13, thanks @ahmetayd).
 - Fixes: malformed health-check JSON (#26), uninitialized health socket busy-loop (#29), uninitialized outer UDP checksum (#28), Geneve per-option bounds check (#31), socket/write return-value handling (#32), fd cleanup on ENI teardown (#36), compiler warnings (#33), and build hygiene (#24, #25) - thanks @lyoung-confluent.
+- High-scale flow-cache optimizations: a coarse (1-second) idle timer refreshed in place, flow-cache expiry on a dedicated reaper thread off the health path, optional `--reserve` pre-sizing of the per-table caches, and cache-line isolation of the hot per-ENI counters. Measured on the test rig (256 B, single appliance): no-drop throughput on par with the prior split-cache build (~300k pps) with the tightest latency tail of the builds compared (worst case ~1.7 ms under overload vs ~2.9-5.0 ms before), and ~0% loss at/under the no-drop ceiling. Also fixes a latent shutdown-ordering use-after-free (tunnel threads outliving the flow caches they read), which `--reserve` turned from benign into a reliable crash.
 
 (Note: v3.2 is in integration on dev-oct2026-prs; the above reflects the planned wave and is reconciled with the merged set at release.)
 

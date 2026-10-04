@@ -8,6 +8,7 @@
 #include "utils.h"
 
 #include <cstring>
+#include <ctime>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
@@ -262,3 +263,30 @@ std::string MakeGwlbeStr(gwlbeid_t eni)
     return ss.str();
 }
 
+
+
+
+// --- Coarse monotonic clock (see utils.h) -----------------------------------
+std::atomic<uint32_t> g_coarseSec{0};
+static struct timespec g_coarseStart;
+
+// CLOCK_BOOTTIME keeps advancing while the system is suspended; fall back to
+// CLOCK_MONOTONIC where it isn't available.
+#ifdef CLOCK_BOOTTIME
+static const clockid_t g_coarseClockId = CLOCK_BOOTTIME;
+#else
+static const clockid_t g_coarseClockId = CLOCK_MONOTONIC;
+#endif
+
+void initCoarseClock()
+{
+    clock_gettime(g_coarseClockId, &g_coarseStart);
+    g_coarseSec.store(0, std::memory_order_relaxed);
+}
+
+void updateCoarseClock()
+{
+    struct timespec now;
+    clock_gettime(g_coarseClockId, &now);
+    g_coarseSec.store((uint32_t)(now.tv_sec - g_coarseStart.tv_sec), std::memory_order_relaxed);
+}
