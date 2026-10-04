@@ -17,6 +17,7 @@
 #include <fstream>
 #include "utils.h"
 #include <csignal>
+#include <atomic>
 #include <cstring>
 #include "Logger.h"
 
@@ -24,7 +25,7 @@ using namespace std::string_literals;
 
 std::string newCmd = "";
 std::string delCmd = "";
-volatile sig_atomic_t keepRunning = 1;
+std::atomic<bool> keepRunning{true};
 
 /**
  * Callback function for when a new GWLB endpoint has been detected by GeneveHandler. Prints a message and calls the create script.
@@ -205,7 +206,7 @@ void printHelp(char *progname)
  */
 void shutdownHandler(int)
 {
-    keepRunning = 0;
+    keepRunning = false;
 }
 
 // Parse one --reserve value: "n,n,n,n,n,n" (global default) or

@@ -19,7 +19,7 @@ static const std::array<std::string, LL_COUNT> loggingLevels = {
 };
 
 Logger::Logger(std::string loggingOptions) :
-    cfg(optionsParse(loggingOptions)), shouldTerminate(false), thread(&Logger::threadFunc, this), thread_ready(false)
+    cfg(optionsParse(loggingOptions)), shouldTerminate(false), thread_ready(false), thread(&Logger::threadFunc, this)
 {
     // Wait for the logging thread to be ready before returning
     std::unique_lock<std::mutex> lock(startup_mutex);

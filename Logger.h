@@ -65,7 +65,6 @@ public:
 
 private:
     bool shouldTerminate;
-    std::thread thread;
 
     LoggingConfiguration optionsParse(std::string loggingOptions);
     void threadFunc();
@@ -79,6 +78,14 @@ private:
     std::mutex startup_mutex;
     std::condition_variable startup_condvar;
     bool thread_ready;
+
+    // Declared LAST so the thread is constructed -- and threadFunc() starts running --
+    // only AFTER every member it touches (queue_mutex/condvar, queue, startup_*,
+    // thread_ready) is constructed. Members init in declaration order, so starting the
+    // thread earlier raced with their construction (TSan-confirmed; this is also the
+    // historical v2.5 "crash on startup if the logger thread didn't initialize quick
+    // enough" footgun).
+    std::thread thread;
 };
 
 #endif //GWLBTUN_LOGGER_H

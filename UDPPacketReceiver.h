@@ -43,8 +43,8 @@ private:
     uint16_t portNumber;
     int threadNumber;
     int coreNumber;
-    bool shutdownRequested;
-    pid_t threadId;
+    std::atomic<bool> shutdownRequested;
+    std::atomic<pid_t> threadId;
     std::future<int> thread;
     udpCallback recvDispatcher;
     int threadFunction();
