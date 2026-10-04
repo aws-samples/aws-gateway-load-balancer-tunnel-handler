@@ -281,6 +281,19 @@ GeneveHandlerENI::GeneveHandlerENI(gwlbeid_t eni, int tcpCacheTimeout, int udpCa
 
 GeneveHandlerENI::~GeneveHandlerENI()
 {
+    // Stop the tunnel worker threads FIRST. These threads run tunReceiverCallback(),
+    // which looks up our flow caches on every return packet. tunnelIn/tunnelOut are
+    // declared ahead of the flow-cache members, so normal member destruction would
+    // free the caches first and leave the still-running tun threads reading freed
+    // memory -- a use-after-free (benign-looking with a small heap cache, but a
+    // reliable segfault once --reserve makes the cache a large mmap that gets
+    // unmapped on free). ~TunInterface signals and joins its threads, so once these
+    // resets return no tun callback can still be in flight against the caches.
+    tunnelIn.reset();
+#ifndef NO_RETURN_TRAFFIC
+    tunnelOut.reset();
+#endif
+
 #ifndef NO_RETURN_TRAFFIC
     if(sendingSock != -1)
         close(sendingSock);
