@@ -258,7 +258,6 @@ GeneveHandlerENI::GeneveHandlerENI(gwlbeid_t eni, int tcpCacheTimeout, int udpCa
     devOutName("none"s),
 #endif
         gwiWriter(devname_make(eni, true)),
-        lastPacketOut(std::chrono::steady_clock::now()),
         sendingSock(-1),
         createCallback(std::move(createCallback)), destroyCallback(std::move(destroyCallback))
 {
@@ -456,15 +455,15 @@ void GeneveHandlerENI::udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssiz
 void GeneveHandlerENI::writeToTun(const unsigned char *pkt, ssize_t pktlen)
 {
     ssize_t written = gwiWriter.write(pkt, pktlen);
-    lastPacketOut = std::chrono::steady_clock::now();
+    hot.lastPacketOut = std::chrono::steady_clock::now();
     if(__builtin_expect(written == pktlen, 1))
     {
-        pktsOut++;
-        bytesOut += pktlen;
+        hot.pktsOut++;
+        hot.bytesOut += pktlen;
     }
     else
     {
-        pktsDropped++;
+        hot.pktsDropped++;
         if(written < 0)
             LOG(LS_UDP, LL_IMPORTANT, "Failed to write "s + ts(pktlen) + " byte packet to "s + devInName + ": "s + std::error_code{errno, std::generic_category()}.message());
         else
@@ -532,7 +531,7 @@ GeneveHandlerENIHealthCheck GeneveHandlerENI::check()
 #else
     bool healthy = tunnelIn->healthCheck();
 #endif
-    return { healthy, eniStr, pktsOut.load(), bytesOut.load(), pktsDropped.load(), lastPacketOut.load(), tunnelIn->status()
+    return { healthy, eniStr, hot.pktsOut.load(), hot.bytesOut.load(), hot.pktsDropped.load(), hot.lastPacketOut.load(), tunnelIn->status()
 #ifndef NO_RETURN_TRAFFIC
              , tunnelOut->status(),
              gwlbV4CookiesTcp.stats(), gwlbV4CookiesUdp.stats(), gwlbV4CookiesOther.stats(),
@@ -558,7 +557,7 @@ bool GeneveHandlerENI::hasGoneIdle(int timeout)
 {
     std::chrono::steady_clock::time_point expireTime = std::chrono::steady_clock::now() - std::chrono::seconds(timeout);
 
-    if(lastPacketOut.load() > expireTime) return false;
+    if(hot.lastPacketOut.load() > expireTime) return false;
 #ifndef NO_RETURN_TRAFFIC
     if(tunnelIn->lastPacketTime() > expireTime) return false;
     if(tunnelOut->lastPacketTime() > expireTime) return false;

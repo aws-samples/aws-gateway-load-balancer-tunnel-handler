@@ -114,10 +114,16 @@ private:
 
     // Socket to write to our associated tunnel
     TunSocket gwiWriter;
-    std::atomic<uint64_t> pktsOut{0}; 
-    std::atomic<uint64_t> bytesOut{0}; 
-    std::atomic<std::chrono::steady_clock::time_point> lastPacketOut;
-    std::atomic<uint64_t> pktsDropped{0};
+    // Hot per-packet counters on their own cache line, so these writes don't
+    // invalidate lines holding read-mostly fields touched on every packet
+    // (sendingSock, flow caches, callbacks) - i.e. avoid false sharing.
+    struct alignas(64) HotCounters {
+        std::atomic<uint64_t> pktsOut{0};
+        std::atomic<uint64_t> bytesOut{0};
+        std::atomic<uint64_t> pktsDropped{0};
+        std::atomic<std::chrono::steady_clock::time_point> lastPacketOut{std::chrono::steady_clock::now()};
+    };
+    HotCounters hot;
     void writeToTun(const unsigned char *pkt, ssize_t pktlen) __attribute__((hot));
 
     // Socket used by all threads for sending
