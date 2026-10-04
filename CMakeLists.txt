@@ -2,10 +2,11 @@ cmake_minimum_required(VERSION 3.13)
 project(gwlbtun)
 set(CMAKE_CXX_STANDARD 17)
 
-# Suppress FindBoost deprecation warning in CMake 3.30+
-if(POLICY CMP0167)
-    cmake_policy(SET CMP0167 OLD)
-endif()
+# Vendored header-only third-party libraries (Boost subset via bcp, nlohmann/json).
+# SYSTEM so their headers don't trip our -Wall -Wextra -Wshadow, and so <boost/...> /
+# <json/json.hpp> resolve (Boost headers cross-include via <boost/...>, which needs the
+# vendor root on the include path). No external Boost install / find_package required.
+include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/third_party)
 
 find_package(Threads)
 
@@ -63,11 +64,6 @@ configure_file(
     ${CMAKE_BINARY_DIR}/version.h
     @ONLY
 )
-
-find_package(Boost 1.83 REQUIRED)
-if(Boost_FOUND)
-    include_directories(${Boost_INCLUDE_DIRS})
-endif()
 
 set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wshadow")
 set(CMAKE_CXX_FLAGS_RELEASE "-Ofast")
