@@ -26,7 +26,7 @@ using namespace std::string_literals;
 #define GENEVE_PORT        6081         // UDP port number that GENEVE uses by standard
 
 // Define the thread-local cache declared in the header
-thread_local std::unordered_map<const GeneveHandler*, std::unordered_map<eniid_t, std::weak_ptr<GeneveHandlerENI>>> GeneveHandler::tlsEniCache;
+thread_local std::unordered_map<const GeneveHandler*, std::unordered_map<gwlbeid_t, std::weak_ptr<GeneveHandlerENI>>> GeneveHandler::tlsEniCache;
 
 /**
  * Empty GwlbData initializer. Needed as we move-assign on occasion.
@@ -194,19 +194,19 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
             return;
         }
 
-        if(!gp.gwlbeEniIdValid)
+        if(!gp.gwlbeEndpointIdValid)
         {
-            LOG(LS_GENEVE, LL_DEBUG, "GWLBe ENI ID not valid");
+            LOG(LS_GENEVE, LL_DEBUG, "GWLBe endpoint ID not valid");
             return;
         }
 
-        auto gwlbeEniId = gp.gwlbeEniId;
+        auto gwlbeEndpointId = gp.gwlbeEndpointId;
         auto header = GeneveHeader(pkt, pkt + gp.headerLen);
         auto gd = GwlbData(std::move(header), srcAddr, srcPort, dstAddr, dstPort);
 
         // Fast path: check thread-local weak cache first
         auto &localCache = tlsEniCache[this];
-        if (auto it = localCache.find(gwlbeEniId); it != localCache.end()) {
+        if (auto it = localCache.find(gwlbeEndpointId); it != localCache.end()) {
             if (auto sp = it->second.lock()) {
                 sp->udpReceiverCallback(std::move(gd), pkt, pktlen);
                 return;
@@ -220,15 +220,15 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
         auto cb = [&](const auto& eniHandler) {
             resolvedHandler = eniHandler.second.ptr;
         };
-        if(eniHandlers.try_emplace_or_cvisit(gwlbeEniId, gwlbeEniId, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, tunThreadConfig, createCallback, destroyCallback, cb))
+        if(eniHandlers.try_emplace_or_cvisit(gwlbeEndpointId, gwlbeEndpointId, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, tunThreadConfig, createCallback, destroyCallback, cb))
         {
             // We did a create - redo the visit to capture ptr
-            eniHandlers.cvisit(gwlbeEniId, cb);
+            eniHandlers.cvisit(gwlbeEndpointId, cb);
         }
 
         // Store in thread-local cache and dispatch
         if (resolvedHandler) {
-            localCache.emplace(gwlbeEniId, std::weak_ptr<GeneveHandlerENI>(resolvedHandler));
+            localCache.emplace(gwlbeEndpointId, std::weak_ptr<GeneveHandlerENI>(resolvedHandler));
             resolvedHandler->udpReceiverCallback(std::move(gd), pkt, pktlen);
         }
     }
@@ -242,17 +242,17 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
  * GeneveHandlerENI handles all aspects of handling for a given ENI. It is separated out this way to make dealing with
  * keeping all the resources needed on a per ENI basis easier.
  */
-GeneveHandlerENI::GeneveHandlerENI(eniid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback) :
-        eni(eni), eniStr(MakeENIStr(eni)), tcpCacheTimeout(tcpCacheTimeout), udpCacheTimeout(udpCacheTimeout), otherCacheTimeout(otherCacheTimeout),
+GeneveHandlerENI::GeneveHandlerENI(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig& tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback) :
+        eni(eni), eniStr(MakeGwlbeStr(eni)), tcpCacheTimeout(tcpCacheTimeout), udpCacheTimeout(udpCacheTimeout), otherCacheTimeout(otherCacheTimeout),
         devInName(devname_make(eni, true)),
 #ifndef NO_RETURN_TRAFFIC
         devOutName(devname_make(eni, false)),
-        gwlbV4CookiesTcp("IPv4 TCP Flow Cache for ENI " + eniStr, tcpCacheTimeout),
-        gwlbV4CookiesUdp("IPv4 UDP Flow Cache for ENI " + eniStr, udpCacheTimeout),
-        gwlbV4CookiesOther("IPv4 Other Flow Cache for ENI " + eniStr, otherCacheTimeout),
-        gwlbV6CookiesTcp("IPv6 TCP Flow Cache for ENI " + eniStr, tcpCacheTimeout),
-        gwlbV6CookiesUdp("IPv6 UDP Flow Cache for ENI " + eniStr, udpCacheTimeout),
-        gwlbV6CookiesOther("IPv6 Other Flow Cache for ENI " + eniStr, otherCacheTimeout),
+        gwlbV4CookiesTcp("IPv4 TCP Flow Cache for GWLBe vpce-" + eniStr, tcpCacheTimeout),
+        gwlbV4CookiesUdp("IPv4 UDP Flow Cache for GWLBe vpce-" + eniStr, udpCacheTimeout),
+        gwlbV4CookiesOther("IPv4 Other Flow Cache for GWLBe vpce-" + eniStr, otherCacheTimeout),
+        gwlbV6CookiesTcp("IPv6 TCP Flow Cache for GWLBe vpce-" + eniStr, tcpCacheTimeout),
+        gwlbV6CookiesUdp("IPv6 UDP Flow Cache for GWLBe vpce-" + eniStr, udpCacheTimeout),
+        gwlbV6CookiesOther("IPv6 Other Flow Cache for GWLBe vpce-" + eniStr, otherCacheTimeout),
 #else
     devOutName("none"s),
 #endif
@@ -480,7 +480,7 @@ std::string GeneveHandlerENIHealthCheck::output_str()
 {
     std::stringstream ret;
 
-    ret << "Handler for ENI " << eniStr << " is " << (healthy ? "healthy" : "UNHEALTHY") << std::endl;
+    ret << "Handler for GWLBe vpce-" << eniStr << " is " << (healthy ? "healthy" : "UNHEALTHY") << std::endl;
     ret << std::to_string(pktsOut) << " packets out to OS, " << std::to_string(bytesOut) << " bytes out to OS, " << std::to_string(pktsDropped) << " packets dropped on write, " << timepointDeltaString(std::chrono::steady_clock::now(), lastPacketOut) + " since last packet.\n";
     ret << tunnelIn.output_str();
 #ifndef NO_RETURN_TRAFFIC
@@ -498,7 +498,7 @@ std::string GeneveHandlerENIHealthCheck::output_str()
 
 json GeneveHandlerENIHealthCheck::output_json()
 {
-    return {{"healthy", healthy}, {"eniStr", eniStr}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"pktsDropped", pktsDropped}, {"secsSinceLastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacketOut)}, {"tunnelIn", tunnelIn.output_json()}
+    return {{"healthy", healthy}, {"gwlbEndpointId", "vpce-" + eniStr}, {"pktsOut", pktsOut}, {"bytesOut", bytesOut}, {"pktsDropped", pktsDropped}, {"secsSinceLastPacket", timepointDeltaDouble(std::chrono::steady_clock::now(), lastPacketOut)}, {"tunnelIn", tunnelIn.output_json()}
 #ifndef NO_RETURN_TRAFFIC
     , {"tunnelOut", tunnelOut.output_json()},
     {"v4FlowCacheTcp", v4FlowCacheTcp.output_json()}, {"v4FlowCacheUdp", v4FlowCacheUdp.output_json()}, {"v4FlowCacheOther", v4FlowCacheOther.output_json()},
@@ -543,13 +543,13 @@ bool GeneveHandlerENI::hasGoneIdle(int timeout)
 /**
  * GeneveHandlerENI shared pointer wrapper class
  */
-GeneveHandlerENIPtr::GeneveHandlerENIPtr(eniid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig &tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback)
+GeneveHandlerENIPtr::GeneveHandlerENIPtr(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, ThreadConfig &tunThreadConfig, ghCallback createCallback, ghCallback destroyCallback)
 {
     ptr = std::make_shared<GeneveHandlerENI>(eni, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, tunThreadConfig, createCallback, destroyCallback);
 }
 
 
-std::string devname_make(eniid_t eni, bool inbound) {
+std::string devname_make(gwlbeid_t eni, bool inbound) {
     if(inbound)
         return "gwi-"s + toBase60(eni);
     else

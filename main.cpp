@@ -29,13 +29,13 @@ volatile sig_atomic_t keepRunning = 1;
  * @param egressInt New egress interface.
  * @param eniId ENI ID of the new endpoint.
  */
-void newInterfaceCallback(std::string ingressInt, const std::string egressInt, eniid_t eniId)
+void newInterfaceCallback(std::string ingressInt, const std::string egressInt, gwlbeid_t eniId)
 {
-    LOG(LS_CORE, LL_IMPORTANT, "New interface "s + ingressInt + " and "s + egressInt + " for ENI ID "s  + MakeENIStr(eniId) +  " created."s);
+    LOG(LS_CORE, LL_IMPORTANT, "New interface "s + ingressInt + " and "s + egressInt + " for GWLB endpoint vpce-"s  + MakeGwlbeStr(eniId) +  " created."s);
     if(newCmd.length() > 0)
     {
         std::stringstream ss;
-        ss << newCmd << " CREATE " << ingressInt << " " << egressInt << " " << MakeENIStr(eniId);
+        ss << newCmd << " CREATE " << ingressInt << " " << egressInt << " " << MakeGwlbeStr(eniId);
         system(ss.str().c_str());
     }
 }
@@ -46,13 +46,13 @@ void newInterfaceCallback(std::string ingressInt, const std::string egressInt, e
  * @param egressInt Old egress interface.
  * @param eniId Old ENI ID.
  */
-void deleteInterfaceCallback(std::string ingressInt, const std::string egressInt, eniid_t eniId)
+void deleteInterfaceCallback(std::string ingressInt, const std::string egressInt, gwlbeid_t eniId)
 {
-    LOG(LS_CORE, LL_IMPORTANT, "Removing interface "s + ingressInt + " and "s + egressInt + " for ENI ID "s + MakeENIStr(eniId) + "."s);
+    LOG(LS_CORE, LL_IMPORTANT, "Removing interface "s + ingressInt + " and "s + egressInt + " for GWLB endpoint vpce-"s + MakeGwlbeStr(eniId) + "."s);
     if(delCmd.length() > 0)
     {
         std::stringstream ss;
-        ss << delCmd << " DESTROY " << ingressInt << " " << egressInt << " " << MakeENIStr(eniId);
+        ss << delCmd << " DESTROY " << ingressInt << " " << egressInt << " " << MakeGwlbeStr(eniId);
         system(ss.str().c_str());
     }
 }

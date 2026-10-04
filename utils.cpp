@@ -249,11 +249,12 @@ void ParseThreadConfiguration(int threadcount, std::string& affinity, ThreadConf
 }
 
 /**
- * Convert an eniid_t to a hex string
+ * Convert a GWLB endpoint id to its hex string. Rendered as 17-char zero-padded
+ * hex, matching the "vpce-" endpoint id as shown in the AWS console.
  * @param eni
  * @return
  */
-std::string MakeENIStr(eniid_t eni)
+std::string MakeGwlbeStr(gwlbeid_t eni)
 {
     std::stringstream ss;
 

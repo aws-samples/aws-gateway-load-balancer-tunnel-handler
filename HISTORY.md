@@ -1,6 +1,6 @@
 ## Current Development Branch (v3.2):
+- Corrected terminology: the GENEVE Option Class 0x0108 type-1 field is the GWLB **endpoint** (VPC endpoint, `vpce-`) identifier, not the ENI of that endpoint. Logs and health output now label it "GWLB endpoint" and show the `vpce-` prefix. **Health JSON change:** the per-ENI object's `eniStr` key is renamed to `gwlbEndpointId` (value now `vpce-`-prefixed) - update any tooling that parses the health JSON.
 - recvmmsg() batch receive on the UDP ingress path, configurable SO_RCVBUF, and reduced shutdown latency for higher throughput (#21, thanks @nikvouk-aws).
-- Prometheus text exposition format for the health check port (#27, thanks @lyoung-confluent).
 - Container image and Kubernetes DaemonSet manifest (#13, thanks @ahmetayd).
 - Fixes: malformed health-check JSON (#26), uninitialized health socket busy-loop (#29), uninitialized outer UDP checksum (#28), Geneve per-option bounds check (#31), socket/write return-value handling (#32), fd cleanup on ENI teardown (#36), compiler warnings (#33), and build hygiene (#24, #25) - thanks @lyoung-confluent.
 
