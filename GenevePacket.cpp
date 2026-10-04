@@ -44,7 +44,7 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
     }
 
     // Ethertype check - load as uint16_t directly
-    uint16_t ethertype = be16toh(*(uint16_t *)&pktBuf[2]);
+    uint16_t ethertype = be16toh_unaligned(&pktBuf[2]);
     if(__builtin_expect(ethertype != ETH_P_IP && ethertype != ETH_P_IPV6, 0))
     {
         status = GP_STATUS_BAD_ETHERTYPE;
@@ -71,7 +71,7 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
         // Need at least 4 bytes left for the option header itself. See RFC 8926 section 3.5.
         if(pktPtr + 4 > pktEnd)
             break;
-        uint16_t optClass = be16toh(*(uint16_t *)&pktPtr[0]);
+        uint16_t optClass = be16toh_unaligned(&pktPtr[0]);
         uint8_t optType = pktPtr[2];
         uint8_t optLen = (pktPtr[3] & 0x1f) * 4;
         // The option's declared data length must also fit within the remaining option region,
@@ -89,17 +89,17 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
                 // identifier the flow arrived through -- NOT the ENI of that endpoint.
                 // Carried as a 64-bit value; rendered as hex (see MakeGwlbeStr).
                 gwlbeEndpointIdValid = true;
-                gwlbeEndpointId = be64toh(*(uint64_t *)optData);
+                gwlbeEndpointId = be64toh_unaligned(optData);
             }
             else if(optType == 2 && optLen == 8)
             {
                 attachmentIdValid = true;
-                attachmentId = be64toh(*(uint64_t *)optData);
+                attachmentId = be64toh_unaligned(optData);
             }
             else if(optType == 3 && optLen == 4)
             {
                 flowCookieValid = true;
-                flowCookie = be32toh(*(uint32_t *)optData);
+                flowCookie = be32toh_unaligned(optData);
             }
         }
         pktPtr += 4 + optLen;
