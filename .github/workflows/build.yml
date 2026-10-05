@@ -12,9 +12,9 @@ name: build
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ['v*']
   workflow_dispatch: {}
 
@@ -43,20 +43,29 @@ jobs:
           docker run --rm -v "$PWD":/src -w /src amazonlinux:2023 \
             bash .github/scripts/build-al2023.sh
 
-      - name: Collect binary
+      - name: Collect binary (and the eBPF object)
         run: |
           mkdir -p dist
           cp build/gwlbtun "dist/gwlbtun-linux-${{ matrix.arch }}"
+          # gwlbtun-ebpf.o is architecture-independent BPF bytecode (byte-identical from either
+          # arch), so publish a single copy from the x86_64 leg — avoids a duplicate filename
+          # when the release jobs flatten both arch artifacts (merge-multiple).
+          if [ "${{ matrix.arch }}" = "x86_64" ] && [ -f build/gwlbtun-ebpf.o ]; then
+            cp build/gwlbtun-ebpf.o dist/gwlbtun-ebpf.o
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: gwlbtun-linux-${{ matrix.arch }}
-          path: dist/gwlbtun-linux-${{ matrix.arch }}
+          path: dist/
           if-no-files-found: error
 
   release-latest:
     name: release (latest, push to main)
     needs: build
+    # 'latest' tracks main and ONLY main. The build job also runs on pushes to dev, but this
+    # guard keeps the rolling 'latest' release pinned to main HEAD — a push to dev (or any other
+    # branch) builds + uploads run artifacts but never rolls 'latest' forward.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
@@ -72,9 +81,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Single rolling release: roll the 'latest' tag forward to this commit each push to main.
+          # Include the eBPF object when present (it ships once the v4.0 eBPF line reaches main).
+          FILES="dist/gwlbtun-linux-x86_64 dist/gwlbtun-linux-aarch64"
+          [ -f dist/gwlbtun-ebpf.o ] && FILES="$FILES dist/gwlbtun-ebpf.o"
           gh release delete latest --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
           gh release create latest \
-            dist/gwlbtun-linux-x86_64 dist/gwlbtun-linux-aarch64 \
+            $FILES \
             --repo "$GITHUB_REPOSITORY" \
             --target "${GITHUB_SHA}" \
             --title "Latest build (main)" \
@@ -99,8 +111,13 @@ jobs:
         run: |
           # Durable, versioned release named after the tag (e.g. v3.2). --verify-tag ensures the
           # tag exists; create (not delete+create) so a published release is never clobbered.
+          # Operational discipline: cut v* tags from main only, so versioned releases match the
+          # stable line (the rolling 'latest' is already main-pinned by the release-latest guard).
+          # Include the eBPF object when present (ships once the v4.0 line is tagged).
+          FILES="dist/gwlbtun-linux-x86_64 dist/gwlbtun-linux-aarch64"
+          [ -f dist/gwlbtun-ebpf.o ] && FILES="$FILES dist/gwlbtun-ebpf.o"
           gh release create "${GITHUB_REF_NAME}" \
-            dist/gwlbtun-linux-x86_64 dist/gwlbtun-linux-aarch64 \
+            $FILES \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "${GITHUB_REF_NAME}" \
