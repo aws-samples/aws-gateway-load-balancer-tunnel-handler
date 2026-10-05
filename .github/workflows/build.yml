@@ -2,8 +2,11 @@ name: build
 
 # Build gwlbtun on Amazon Linux 2023 for both x86_64 and aarch64.
 #   - pull_request to main : build both arches, attach binaries as (ephemeral) run artifacts.
-#   - push to main         : build both arches AND publish a GitHub Release with the binaries,
-#                            so every merge to main yields durable, downloadable binaries.
+#   - push to main         : build both arches AND roll the 'latest' GitHub Release forward,
+#                            so main always has durable, downloadable binaries.
+#   - push of a v* tag     : build both arches AND publish a durable, versioned GitHub Release
+#                            (e.g. v3.2). Because the build runs `git describe --tags`, those
+#                            binaries self-identify with the tag in their --help banner.
 # Each arch builds natively (x86_64 and arm64 GitHub-hosted runners) inside an amazonlinux:2023
 # container -- no QEMU, and the binary links AL2023's glibc.
 
@@ -12,6 +15,7 @@ on:
     branches: [main]
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch: {}
 
 permissions:
@@ -31,6 +35,8 @@ jobs:
     runs-on: ${{ matrix.runs_on }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history + tags so `git describe --tags` stamps the version
 
       - name: Build in Amazon Linux 2023 container
         run: |
@@ -48,7 +54,7 @@ jobs:
           path: dist/gwlbtun-linux-${{ matrix.arch }}
           if-no-files-found: error
 
-  release:
+  release-latest:
     name: release (latest, push to main)
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -56,8 +62,6 @@ jobs:
     permissions:
       contents: write          # create/replace the release + tag
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -68,9 +72,36 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Single rolling release: roll the 'latest' tag forward to this commit each push to main.
-          gh release delete latest --yes --cleanup-tag || true
+          gh release delete latest --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
           gh release create latest \
             dist/gwlbtun-linux-x86_64 dist/gwlbtun-linux-aarch64 \
+            --repo "$GITHUB_REPOSITORY" \
             --target "${GITHUB_SHA}" \
             --title "Latest build (main)" \
             --notes "Automated Amazon Linux 2023 build of main (${GITHUB_SHA}). x86_64 + aarch64."
+
+  release-tag:
+    name: release (versioned, v* tag)
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write          # create the versioned release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the ${{ github.ref_name }} release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Durable, versioned release named after the tag (e.g. v3.2). --verify-tag ensures the
+          # tag exists; create (not delete+create) so a published release is never clobbered.
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/gwlbtun-linux-x86_64 dist/gwlbtun-linux-aarch64 \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Amazon Linux 2023 build of ${GITHUB_REF_NAME} (${GITHUB_SHA}). x86_64 + aarch64. See HISTORY.md for the changelog."
