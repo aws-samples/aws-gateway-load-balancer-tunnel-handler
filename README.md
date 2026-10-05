@@ -3,6 +3,25 @@ This software supports using the Gateway Load Balancer AWS service. It is design
 
 See the 'example-scripts' folder for some of the options that can be used as create scripts for this software.
 
+## Prebuilt binaries
+Every push to `main` and every tagged release publishes prebuilt Linux binaries for `x86_64` and `aarch64` (Graviton), built on Amazon Linux 2023. They dynamically link AL2023's glibc, so they run on AL2023 and other distributions with a compatible (equal or newer) glibc; on older systems, build from source instead (see below).
+
+Newest stable build (tracks `main`):
+```
+# x86_64 (Intel/AMD)
+curl -LO https://github.com/aws-samples/aws-gateway-load-balancer-tunnel-handler/releases/download/latest/gwlbtun-linux-x86_64
+# aarch64 (Graviton/ARM)
+curl -LO https://github.com/aws-samples/aws-gateway-load-balancer-tunnel-handler/releases/download/latest/gwlbtun-linux-aarch64
+chmod +x gwlbtun-linux-*
+```
+
+A specific version, frozen for pinning (e.g. v3.2):
+```
+curl -LO https://github.com/aws-samples/aws-gateway-load-balancer-tunnel-handler/releases/download/v3.2/gwlbtun-linux-x86_64
+```
+
+All releases, with changelogs, are on the [Releases page](https://github.com/aws-samples/aws-gateway-load-balancer-tunnel-handler/releases). You can confirm the version of a downloaded binary with `./gwlbtun-linux-x86_64 -h` (the first line reports e.g. `v3.2`).
+
 ## To Compile
 On an Amazon Linux 2 or AL2023 host, copy this code down, and install dependencies:
 
