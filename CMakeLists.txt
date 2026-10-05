@@ -1,15 +1,77 @@
 cmake_minimum_required(VERSION 3.13)
 project(gwlbtun)
 set(CMAKE_CXX_STANDARD 17)
+
+# Vendored header-only third-party libraries (Boost subset via bcp, nlohmann/json).
+# SYSTEM so their headers don't trip our -Wall -Wextra -Wshadow=local, and so <boost/...> /
+# <json/json.hpp> resolve (Boost headers cross-include via <boost/...>, which needs the
+# vendor root on the include path). No external Boost install / find_package required.
+include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/third_party)
+
 find_package(Threads)
 
-set(Boost_INCLUDE_DIR /home/ec2-user/boost)
-find_package(Boost 1.83 REQUIRED)
-if(Boost_FOUND)
-    include_directories(${Boost_INCLUDE_DIRS})
+# Get git commit information
+execute_process(
+    COMMAND git log -1 --format=%H
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_COMMIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+
+execute_process(
+    COMMAND git log -1 --format=%h
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_COMMIT_SHORT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+
+execute_process(
+    COMMAND git describe --tags --always --dirty
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_DESCRIBE
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+
+# Check if working directory is clean
+execute_process(
+    COMMAND git diff-index --quiet HEAD --
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    RESULT_VARIABLE GIT_DIRTY
+    ERROR_QUIET
+)
+
+if(NOT GIT_COMMIT_HASH)
+    set(GIT_COMMIT_HASH "unknown")
+    set(GIT_COMMIT_SHORT "unknown")
+    set(GIT_DESCRIBE "unknown")
 endif()
 
-set(CMAKE_CXX_FLAGS "-Wall -Wextra")
+if(GIT_DIRTY)
+    set(GIT_DIRTY_FLAG "-dirty")
+else()
+    set(GIT_DIRTY_FLAG "")
+endif()
+
+# Get build timestamp
+string(TIMESTAMP BUILD_TIMESTAMP "%Y-%m-%d %H:%M:%S UTC" UTC)
+
+# Configure version header
+configure_file(
+    ${CMAKE_SOURCE_DIR}/version.h.in
+    ${CMAKE_BINARY_DIR}/version.h
+    @ONLY
+)
+
+# -Wshadow=local (not bare -Wshadow): warn when a local/parameter shadows another
+# local/parameter, but NOT when a parameter shadows a member or global. The codebase
+# deliberately names constructor parameters after the members they initialize
+# (member-init-list idiom, e.g. FlowCache / *HealthCheck ctors), which is safe; bare
+# -Wshadow floods on that pattern and trains the warning to be ignored. =local keeps the
+# signal that matters -- a local shadowing another local (the real footgun class).
+set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wshadow=local")
 set(CMAKE_CXX_FLAGS_RELEASE "-Ofast")
 
 set(CMAKE_CXX_FLAGS_DEBUG "-fstack-protector-all -fsanitize=address -pg -O0 -g")
@@ -20,4 +82,5 @@ add_compile_options("")
 add_executable(gwlbtun main.cpp UDPPacketReceiver.cpp UDPPacketReceiver.h GenevePacket.cpp GenevePacket.h TunInterface.cpp TunInterface.h utils.cpp utils.h PacketHeaderV4.cpp PacketHeaderV4.h PacketHeaderV6.cpp PacketHeaderV6.h GeneveHandler.cpp GeneveHandler.h FlowCache.h FlowCacheHealthCheck.cpp Logger.cpp Logger.h
         HealthCheck.h
         FlowCacheHealthCheck.cpp)
+target_include_directories(gwlbtun PRIVATE ${CMAKE_BINARY_DIR})
 target_link_libraries (gwlbtun ${CMAKE_THREAD_LIBS_INIT})

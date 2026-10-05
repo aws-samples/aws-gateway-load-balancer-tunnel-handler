@@ -32,7 +32,7 @@ public:
     UDPPacketReceiverThread();
     ~UDPPacketReceiverThread();
 
-    void setup(int threadNumberParam, int coreNumberParam, uint16_t portNumberParam, udpCallback recvDispatcherParam);
+    void setup(int threadNumberParam, int coreNumberParam, uint16_t portNumberParam, udpCallback recvDispatcherParam, int rcvBufSizeMB, int busyPollUsec);
     bool healthCheck();
     UDPPacketReceiverThreadHealthCheck status();
     void shutdown();
@@ -43,8 +43,8 @@ private:
     uint16_t portNumber;
     int threadNumber;
     int coreNumber;
-    bool shutdownRequested;
-    pid_t threadId;
+    std::atomic<bool> shutdownRequested;
+    std::atomic<pid_t> threadId;
     std::future<int> thread;
     udpCallback recvDispatcher;
     int threadFunction();
@@ -68,7 +68,7 @@ public:
     UDPPacketReceiver();
     ~UDPPacketReceiver();
 
-    void setup(ThreadConfig threadConfig, uint16_t portNumberParam, udpCallback recvDispatcherParam);
+    void setup(ThreadConfig threadConfig, uint16_t portNumberParam, udpCallback recvDispatcherParam, int rcvBufSizeMB = 128, int busyPollUsec = 0);
     bool healthCheck();
     UDPPacketReceiverHealthCheck status();
     void shutdown();

@@ -21,6 +21,7 @@ typedef enum {
     LS_GENEVE,       // GENEVE packet details
     LS_TUNNEL,       // Tunnel processing
     LS_HEALTHCHECK,  // Health check reporting
+    LS_OS,           // Operating system function calls
     LS_COUNT
 } LogSection;
 
@@ -48,8 +49,8 @@ struct LoggingMessage {
 
 extern class Logger *logger;
 
-#define LOG(s,l,msg,...) { if(logger->cfg.ll[s] >= l) logger->Log(s, l, msg, ##__VA_ARGS__); };
-#define LOGHEXDUMP(s,l,hdr,buf,buflen) { if(logger->cfg.ll[s] >= l) logger->LogHexDump(s, l, buf, buflen); };
+#define LOG(s,l,msg,...) do { if(logger->cfg.ll[s] >= l) logger->Log(s, l, msg, ##__VA_ARGS__); } while(0)
+#define LOGHEXDUMP(s,l,hdr,buf,buflen) do { if(logger->cfg.ll[s] >= l) logger->LogHexDump(s, l, buf, buflen); } while(0)
 #define IS_LOGGING(s,l) (logger->cfg.ll[s] <= l)
 #define ts(s)  std::to_string(s)
 
@@ -64,7 +65,6 @@ public:
 
 private:
     bool shouldTerminate;
-    std::thread thread;
 
     LoggingConfiguration optionsParse(std::string loggingOptions);
     void threadFunc();
@@ -73,6 +73,19 @@ private:
     std::mutex queue_mutex;
     std::condition_variable queue_condvar;
     std::queue<struct LoggingMessage> queue;
+    
+    // Thread startup synchronization
+    std::mutex startup_mutex;
+    std::condition_variable startup_condvar;
+    bool thread_ready;
+
+    // Declared LAST so the thread is constructed -- and threadFunc() starts running --
+    // only AFTER every member it touches (queue_mutex/condvar, queue, startup_*,
+    // thread_ready) is constructed. Members init in declaration order, so starting the
+    // thread earlier raced with their construction (TSan-confirmed; this is also the
+    // historical v2.5 "crash on startup if the logger thread didn't initialize quick
+    // enough" footgun).
+    std::thread thread;
 };
 
 #endif //GWLBTUN_LOGGER_H

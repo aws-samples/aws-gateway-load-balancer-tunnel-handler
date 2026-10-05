@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 
 # Note: This requires this instance to have Source/Dest check disabled.
 # aws ec2 modify-instance-attribute --instance-id=<instID> --no-source-dest-check

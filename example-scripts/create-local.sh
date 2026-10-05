@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 
 # This version of the create script makes it so locally-hosted services can answer and reply backc through GWLB
 # correctly.

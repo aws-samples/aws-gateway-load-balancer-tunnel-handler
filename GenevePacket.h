@@ -11,7 +11,7 @@
 #include <iostream>
 #include <boost/container/small_vector.hpp>
 
-typedef uint64_t eniid_t;
+typedef uint64_t gwlbeid_t;
 
 // Take the assumption options will remain below 32 bytes, otherwise this should be increased
 typedef boost::container::small_vector<unsigned char, 40> GeneveHeader;
@@ -19,15 +19,15 @@ typedef boost::container::small_vector<unsigned char, 40> GeneveHeader;
 class GenevePacket {
 public:
     GenevePacket();
-    GenevePacket(unsigned char *pktBuf, ssize_t pktLen);   // pktBuf points to the start of the Geneve header (i.e. after the outer UDP header)
+    GenevePacket(unsigned char *pktBuf, ssize_t pktLen) __attribute__((hot));   // pktBuf points to the start of the Geneve header (i.e. after the outer UDP header)
     
-    eniid_t gwlbeEniId;         // The GWLBE ENI ID option, if it was found (check via the valid boolean)
+    gwlbeid_t gwlbeEndpointId;    // The GWLB endpoint (VPC endpoint, "vpce-") ID option, if found (check via the valid boolean). This is the endpoint identifier, NOT the ENI of that endpoint.
     uint64_t attachmentId;       // The attachment ID option, if it was found
     int status;
     uint32_t flowCookie;         // The flow cookie, if it was found
     uint32_t geneveVni;          // The outer VNI identifier from the Geneve header.
     uint32_t headerLen;          // Length of the Geneve header
-    bool gwlbeEniIdValid, attachmentIdValid, flowCookieValid;   // False if the options weren't found (and the below values MUST NOT be used), or true if they were.
+    bool gwlbeEndpointIdValid, attachmentIdValid, flowCookieValid;   // False if the options weren't found (and the below values MUST NOT be used), or true if they were.
 
     std::string text();
     friend auto operator<<(std::ostream& os, GenevePacket const& m) -> std::ostream&;

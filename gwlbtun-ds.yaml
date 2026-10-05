@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gwlbtun-node
+spec:
+  selector:
+    matchLabels:
+      app: gwlbtun-node
+  template:
+    metadata:
+      labels:
+        app: gwlbtun-node
+        component: network
+    spec:
+      containers:
+      - image: "[docker image]"
+        imagePullPolicy: IfNotPresent
+        name: gwlbtun
+        command:
+        - ./gwlbtun
+        - -c
+        - ./create-route.sh
+        - -p
+        - "8060"
+        resources:
+          requests:
+            cpu: 10m
+            memory: 300Mi
+        securityContext:
+          privileged: true
+          capabilities:
+            add: ["NET_ADMIN"]
+      hostNetwork: true
+      hostPID: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      restartPolicy: Always
