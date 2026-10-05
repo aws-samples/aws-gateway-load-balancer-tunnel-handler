@@ -1,3 +1,6 @@
+## eBPF/XDP acceleration (v4.0, in development):
+- Initial in-kernel XDP ingress fast path. An XDP program on the GWLB-facing interface parses GENEVE and, for flows present in a BPF map, decapsulates and redirects the inner packet directly to the `gwi` interface, bypassing the userspace UDP-socket/TUN round-trip; unknown flows fall through to userspace. Build with libbpf + clang and pass `-e <gwlbtun-ebpf.o>`. Control-plane population of the flow map and the return (`gwo`) path are still in progress.
+
 ## v3.2:
 - Corrected terminology: the GENEVE Option Class 0x0108 type-1 field is the GWLB **endpoint** (VPC endpoint, `vpce-`) identifier, not the ENI of that endpoint. Logs and health output now label it "GWLB endpoint" and show the `vpce-` prefix. **Health JSON change:** the per-ENI object's `eniStr` key is renamed to `gwlbEndpointId` (value now `vpce-`-prefixed) - update any tooling that parses the health JSON.
 - Vendored a header-only subset of Boost (1.92) and nlohmann/json into `third_party/`, so the build no longer needs a separate Boost download or install - `cmake3 . && make` is self-contained on a stock Amazon Linux host (#24, #25, thanks @lyoung-confluent).

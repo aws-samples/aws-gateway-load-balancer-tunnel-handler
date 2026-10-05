@@ -7,6 +7,7 @@
 #include "utils.h"   // ThreadConfig, gwlbeid_t
 #include <array>
 #include <cstddef>
+#include <string>
 #include <unordered_map>
 
 /**
@@ -31,6 +32,11 @@ struct GwlbtunConfig {
     std::array<std::size_t, 6> defaultReserve{16384, 16384, 1024, 1024, 1024, 1024};
     // Optional per-GWLB-endpoint overrides, keyed by endpoint (vpce-) id.
     std::unordered_map<gwlbeid_t, std::array<std::size_t, 6>> perEndpointReserve;
+
+    // eBPF/XDP in-kernel acceleration (empty objectPath = disabled, userspace only).
+    // Kept last so the positional aggregate-init in main() stays stable.
+    std::string ebpfObjectPath;       // path to compiled gwlbtun-ebpf.o (-e)
+    std::string ebpfIngressInterface; // GWLB-facing NIC for ingress (-I); empty = auto-detect default-route NIC
 
     // Reserve vector for a given endpoint: its override if present, else the default.
     const std::array<std::size_t, 6>& reserveFor(gwlbeid_t id) const {

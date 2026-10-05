@@ -297,6 +297,9 @@ After XPS:
 
 ## Advanced usages
 
+### eBPF/XDP acceleration (experimental)
+If `libbpf` (libbpf-devel) and `clang` are installed, the CMake build detects them, compiles the eBPF/XDP program `gwlbtun-ebpf.o`, and builds gwlbtun with eBPF support enabled. Pass the object with `-e <path>/gwlbtun-ebpf.o` and run with the `CAP_BPF`/`CAP_NET_ADMIN` capabilities to have gwlbtun load the program and attach it to the GWLB-facing interface. For flows it recognizes, the inner packet is decapsulated and redirected to the `gwi` interface entirely in-kernel, bypassing the userspace UDP-socket/TUN round-trip; unknown flows fall through to normal userspace processing. This is intended to improve throughput in high packet-rate scenarios. This path is experimental and under active development — control-plane population of the flow map, the return (`gwo`) path, and multi-interface attach are not yet complete.
+
 ### No return mode
 If you are only interested in the ability to receive traffic to an L3 tunnel interface, and will never send traffic back to GWLB, you can #define NO_RETURN_TRAFFIC in utils.h. This removes the gwo interfaces and all cookie flow tracking, which saves on time used to synchronize that flow tracking table. Note that this puts your appliance in a two-arm mode with GWLB, and also may result in asymmetric traffic routing, which may have performance implications elsewhere. 
 

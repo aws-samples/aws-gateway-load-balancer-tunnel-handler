@@ -11,7 +11,7 @@
 using namespace std::string_literals;
 
 static const std::array<std::string, LS_COUNT + 1> loggingSections = {
-        "core"s, "udp"s, "geneve"s, "tunnel"s, "healthcheck"s, "os"s, "all"s
+        "core"s, "udp"s, "geneve"s, "tunnel"s, "healthcheck"s, "os"s, "ebpf"s, "all"s
 };
 
 static const std::array<std::string, LL_COUNT> loggingLevels = {

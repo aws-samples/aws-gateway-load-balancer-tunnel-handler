@@ -59,6 +59,11 @@ typedef struct ThreadConfigStruct {
 std::string stringFormat(const std::string& fmt_str, ...);
 std::string stringFormat(const std::string& fmt_str, va_list ap);
 bool sendUdpSG(int sock, struct in_addr from_addr, uint16_t from_port, struct in_addr to_addr, uint16_t to_port, const struct iovec *payload_iov, int payload_iovcnt);
+// Build the GWLB return-path outer encap (outer IPv4 + UDP matching sendUdpSG's layout,
+// incl. the intentional ttl=2, then the GENEVE header verbatim) into 'out'. The IP
+// tot_len/checksum and UDP length are left zero for the egress BPF program to fill at
+// send time. Returns the number of bytes written, or 0 if it would not fit.
+size_t buildGwlbEncapBlob(uint8_t *out, size_t outcap, struct in_addr fromAddr, uint16_t fromPort, struct in_addr toAddr, uint16_t toPort, const unsigned char *geneve, size_t genevelen);
 std::string toBase60(uint64_t val);
 std::string timepointDeltaString(std::chrono::steady_clock::time_point t1, std::chrono::steady_clock::time_point t2);
 double timepointDeltaDouble(std::chrono::steady_clock::time_point t1, std::chrono::steady_clock::time_point t2);

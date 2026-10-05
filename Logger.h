@@ -22,6 +22,7 @@ typedef enum {
     LS_TUNNEL,       // Tunnel processing
     LS_HEALTHCHECK,  // Health check reporting
     LS_OS,           // Operating system function calls
+    LS_EBPF,         // eBPF management
     LS_COUNT
 } LogSection;
 

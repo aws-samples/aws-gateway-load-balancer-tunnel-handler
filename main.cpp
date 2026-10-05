@@ -152,6 +152,10 @@ void printHelp(char *progname)
             "  -j         For health check detailed statistics, output as JSON instead of text.\n"
             "  -s         Only return simple health check status (only the HTTP response code), instead of detailed statistics.\n"
             "  -d         Enable debugging output. Short version of --logging all=debug.\n"
+#ifdef ENABLE_EBPF
+            "  -e OBJFILE Load the eBPF program from OBJFILE to accelerate known-flow packet processing in-kernel (tc clsact ingress + egress).\n"
+            "  -I IFNAME  Attach the eBPF ingress program to IFNAME instead of auto-detecting the default-route NIC. Use when GWLB traffic arrives on a dedicated ENI separate from the management interface. (--ebpf-interface)\n"
+#endif
             "\n"
             "Threading options:\n"
             "  --udpthreads NUM         Generate NUM threads for the UDP receiver.\n"
@@ -262,6 +266,8 @@ int main(int argc, char *argv[])
     int tunthreads = numCores();
 #endif
     std::string udpaffinity, tunaffinity, logoptions;
+    std::string ebpfObjectPath;
+    std::string ebpfInterface;
     bool detailedHealth = true, printHelpFlag = false, jsonHealth = false;
 
     // Long options without a short-option equivalent are identified by a unique
@@ -292,11 +298,14 @@ int main(int argc, char *argv[])
             {"rcvbuf", required_argument, NULL, OPT_RCVBUF},
             {"busypoll", required_argument, NULL, OPT_BUSYPOLL},
             {"reserve", required_argument, NULL, OPT_RESERVE},
+            {"ebpf", required_argument, NULL, 'e'},
+            {"ebpf-interface", required_argument, NULL, 'I'},
             {0, 0, 0, 0}
     };
 
     // Argument parsing
-    while ((c = getopt_long (argc, argv, "h?djxc:r:t:p:si:", long_options, NULL)) != -1)
+    // Argument parsing
+    while ((c = getopt_long (argc, argv, "h?djxc:r:t:p:si:e:I:", long_options, NULL)) != -1)
     {
         switch(c)
         {
@@ -345,6 +354,12 @@ int main(int argc, char *argv[])
                 break;
             case 'i':
                 tcpCacheTimeout = atoi(optarg);
+                break;
+            case 'e':
+                ebpfObjectPath = std::string(optarg);
+                break;
+            case 'I':
+                ebpfInterface = std::string(optarg);
                 break;
             case '?':
             case 'h':
@@ -415,7 +430,7 @@ int main(int argc, char *argv[])
 #endif
 
     initCoarseClock();
-    const GwlbtunConfig cfg{ tunnelTimeout, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, udp, tun, rcvBufSizeMB, busyPollUsec, defaultReserve, std::move(perEndpointReserve) };
+    const GwlbtunConfig cfg{ tunnelTimeout, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, udp, tun, rcvBufSizeMB, busyPollUsec, defaultReserve, std::move(perEndpointReserve), ebpfObjectPath, ebpfInterface };
     auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, cfg);
     struct timespec timeout;
     timeout.tv_sec = 1; timeout.tv_nsec = 0;

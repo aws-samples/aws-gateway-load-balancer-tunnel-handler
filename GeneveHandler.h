@@ -20,6 +20,7 @@
 #include <linux/if.h>     // Needed for IFNAMSIZ define
 #include <boost/unordered/concurrent_flat_map.hpp>
 #include "HealthCheck.h"
+#include "EbpfLoader.h"
 
 typedef std::function<void(std::string inInt, std::string outInt, gwlbeid_t eniId)> ghCallback;
 
@@ -59,6 +60,7 @@ public:
                                 FlowCacheHealthCheck, FlowCacheHealthCheck, FlowCacheHealthCheck,
                                 FlowCacheHealthCheck, FlowCacheHealthCheck, FlowCacheHealthCheck
 #endif
+                                , uint64_t ebpfRepunts = 0, uint64_t ebpfLateRepunts = 0
                                 );
     std::string output_str() ;
     json output_json();
@@ -67,7 +69,7 @@ public:
 private:
     bool healthy;
     std::string eniStr;
-    uint64_t pktsOut, bytesOut, pktsDropped;
+    uint64_t pktsOut, bytesOut, pktsDropped, ebpfRepunts, ebpfLateRepunts;
     std::chrono::steady_clock::time_point lastPacketOut;
 
     TunInterfaceHealthCheck tunnelIn;
@@ -82,11 +84,22 @@ private:
 #endif
 };
 
+// Per-flow eBPF state GeneveHandlerENI tracks so the GC sweep can age and remove map
+// entries. Stores the forward egress key (reverse is derived by swapping); the ingress
+// key is just {eni, cookie}. isV4 selects which egress key/map applies.
+struct BpfFlow {
+    bool isV4;
+    EbpfEgressMapKeyV4 v4;
+    EbpfEgressMapKeyV6 v6;
+    std::chrono::steady_clock::time_point learnedAt;   // when this cookie was first learned; used to tell a
+                                                       // benign warm-up-tail punt from a real established-flow re-punt
+};
+
 class GeneveHandlerENI {
 public:
-    GeneveHandlerENI(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, const ThreadConfig& tunThreadConfig, const std::array<std::size_t,6>& reserve, ghCallback createCallback, ghCallback destroyCallback);
+    GeneveHandlerENI(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, const ThreadConfig& tunThreadConfig, const std::array<std::size_t,6>& reserve, ghCallback createCallback, ghCallback destroyCallback, EbpfLoader* ebpfLoader);
     ~GeneveHandlerENI();
-    void udpReceiverCallback(GwlbData gd, unsigned char *pkt, ssize_t pktlen) __attribute__((hot));
+    void udpReceiverCallback(GwlbData gd, uint32_t flowCookie, unsigned char *pkt, ssize_t pktlen) __attribute__((hot));
     void tunReceiverCallback(unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));
     GeneveHandlerENIHealthCheck check();
     void sweepCaches();      // evict expired flow-cache entries (off the health path)
@@ -130,6 +143,26 @@ private:
     int sendingSock;
     const ghCallback createCallback;
     const ghCallback destroyCallback;
+
+    // eBPF acceleration. ebpfLoader is non-owning (it lives on GeneveHandler).
+    EbpfLoader* ebpfLoader;
+    unsigned int gwiIfIndex{0};                        // ifindex of this ENI's gwi interface (0 = unresolved)
+    unsigned int gwoIfIndex{0};                        // ifindex of this ENI's gwo interface (0 = unresolved)
+    boost::concurrent_flat_map<uint32_t, BpfFlow> trackedFlows;  // learned flows, keyed by flow cookie
+    std::atomic<uint64_t> lastBpfActivityNs{0};        // newest map liveness seen by the last GC sweep
+    // Re-punt diagnostics (slow path only). A packet reaches userspace for a cookie that
+    // is already learned either as the benign tail of first-packet learning (counted in
+    // ebpfRepunts) or, if it happens well after the flow was learned, because the in-kernel
+    // entry was lost/evicted while the flow was still active (ebpfLateRepunts -- the alarm:
+    // a non-zero value here means established flows are falling back to the slow path).
+    std::atomic<uint64_t> ebpfRepunts{0};
+    std::atomic<uint64_t> ebpfLateRepunts{0};
+    bool ebpfTrackNewFlow(uint32_t flowCookie, BpfFlow& flow);   // true if newly learned; else counts the re-punt
+    void ebpfInsertIngress(uint32_t flowCookie);                                                      // ingress map insert
+    void ebpfLearnV4(uint32_t flowCookie, const GwlbData& gd, const unsigned char* inner, ssize_t innerLen);  // gate + ingress + egress
+    void ebpfLearnV6(uint32_t flowCookie, const GwlbData& gd, const unsigned char* inner, ssize_t innerLen);
+    void ebpfGc(uint64_t nowNs);                       // age + remove stale map entries, update lastBpfActivityNs
+    int  perProtoTimeout(uint8_t proto) const;         // tcp/udp/other cache timeout in seconds
 };
 
  /**
@@ -139,13 +172,13 @@ private:
   */
  class GeneveHandlerENIPtr {
  public:
-    GeneveHandlerENIPtr(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, const ThreadConfig& tunThreadConfig, const std::array<std::size_t,6>& reserve, ghCallback createCallback, ghCallback destroyCallback);
+    GeneveHandlerENIPtr(gwlbeid_t eni, int tcpCacheTimeout, int udpCacheTimeout, int otherCacheTimeout, const ThreadConfig& tunThreadConfig, const std::array<std::size_t,6>& reserve, ghCallback createCallback, ghCallback destroyCallback, EbpfLoader* ebpfLoader);
     std::shared_ptr<GeneveHandlerENI> ptr;
  };
 
 class GeneveHandlerHealthCheck : public HealthCheck {
 public:
-    GeneveHandlerHealthCheck(bool, UDPPacketReceiverHealthCheck, std::list<GeneveHandlerENIHealthCheck>);
+    GeneveHandlerHealthCheck(bool, UDPPacketReceiverHealthCheck, std::list<GeneveHandlerENIHealthCheck>, EbpfLoaderHealthCheck);
     std::string output_str() ;
     json output_json();
 
@@ -153,6 +186,7 @@ private:
     bool healthy;
     UDPPacketReceiverHealthCheck udp;
     std::list<GeneveHandlerENIHealthCheck> enis;
+    EbpfLoaderHealthCheck ebpfLoader;
 };
 
 class GeneveHandler {
@@ -169,6 +203,7 @@ private:
     ghCallback destroyCallback;
     const GwlbtunConfig config;
     UDPPacketReceiver udpRcvr;
+    EbpfLoader ebpfLoader;
 
     // Thread-local fast-path cache: per-thread weak references to ENI handlers, keyed by this instance
     static thread_local std::unordered_map<const GeneveHandler*, std::unordered_map<gwlbeid_t, std::weak_ptr<GeneveHandlerENI>>> tlsEniCache;

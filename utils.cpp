@@ -130,7 +130,55 @@ bool sendUdpSG(int sock, struct in_addr from_addr, uint16_t from_port,
     return true;
 }
 
+/**
+ * Build the GWLB return-path outer encap into 'out': outer IPv4 + UDP (same header
+ * layout and field values as sendUdpSG, including the intentional ttl=2) followed by
+ * the GENEVE header verbatim. The IP tot_len/checksum and UDP length are left zero —
+ * the egress BPF program fills them from the real packet length at send time.
+ * Returns the number of bytes written, or 0 if the output buffer is too small.
+ */
+size_t buildGwlbEncapBlob(uint8_t *out, size_t outcap, struct in_addr fromAddr, uint16_t fromPort,
+                          struct in_addr toAddr, uint16_t toPort,
+                          const unsigned char *geneve, size_t genevelen)
+{
+    const size_t hdrlen = sizeof(struct iphdr) + sizeof(struct udphdr);  // 20 + 8
+    if(outcap < hdrlen + genevelen)
+        return 0;
+
+    struct iphdr ip;
+    memset(&ip, 0, sizeof(ip));
+    ip.version = 4;
+    ip.ihl = 5;
+    ip.tos = 0;
+    ip.tot_len = 0;          // filled by the egress program (skb->len)
+    ip.id = 0;
+    ip.frag_off = 0;
+    ip.ttl = 2;              // intentional GWLB value, matches sendUdpSG
+    ip.protocol = IPPROTO_UDP;
+    ip.check = 0;            // filled by the egress program
+    ip.saddr = fromAddr.s_addr;
+    ip.daddr = toAddr.s_addr;
+
+    struct udphdr udp;
+    memset(&udp, 0, sizeof(udp));
+    udp.source = htons(fromPort);
+    udp.dest = htons(toPort);
+    udp.len = 0;             // filled by the egress program
+    udp.check = 0;
+
+    memcpy(out, &ip, sizeof(ip));
+    memcpy(out + sizeof(ip), &udp, sizeof(udp));
+    memcpy(out + hdrlen, geneve, genevelen);
+    return hdrlen + genevelen;
+}
+
 const std::string base60 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+/**
+ * Convert a 64 bit number to base60 notation. Note: With a uint64_t, the maximum return from this is "uur953OEv0f".
+ *
+ * @param val The value to convert
+ * @return The value represented as base60
+ */
 /**
  * Convert a 64 bit number to base60 notation. Note: With a uint64_t, the maximum return from this is "uur953OEv0f".
  *

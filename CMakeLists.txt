@@ -81,6 +81,54 @@ add_compile_options("")
 
 add_executable(gwlbtun main.cpp UDPPacketReceiver.cpp UDPPacketReceiver.h GenevePacket.cpp GenevePacket.h TunInterface.cpp TunInterface.h utils.cpp utils.h PacketHeaderV4.cpp PacketHeaderV4.h PacketHeaderV6.cpp PacketHeaderV6.h GeneveHandler.cpp GeneveHandler.h FlowCache.h FlowCacheHealthCheck.cpp Logger.cpp Logger.h
         HealthCheck.h
-        FlowCacheHealthCheck.cpp)
+        FlowCacheHealthCheck.cpp
+        EbpfLoader.cpp EbpfLoader.h EbpfHelpers.h GeneveStructs.h)
 target_include_directories(gwlbtun PRIVATE ${CMAKE_BINARY_DIR})
 target_link_libraries (gwlbtun ${CMAKE_THREAD_LIBS_INIT})
+
+# ------------------------------------------------------------------
+# Optional eBPF/XDP acceleration.
+# If libbpf and clang are present, compile the XDP program (gwlbtun-ebpf.o) and
+# build gwlbtun with eBPF support (ENABLE_EBPF). Otherwise gwlbtun builds normally
+# and every packet is processed in userspace.
+# ------------------------------------------------------------------
+find_path(LIBBPF_INCLUDE_DIRS NAMES bpf/libbpf.h)
+find_library(LIBBPF_LIBRARIES NAMES bpf)
+find_program(CLANG_EXECUTABLE NAMES clang)
+
+if(LIBBPF_INCLUDE_DIRS AND LIBBPF_LIBRARIES AND CLANG_EXECUTABLE)
+    message(STATUS "eBPF support enabled (libbpf: ${LIBBPF_LIBRARIES}, clang: ${CLANG_EXECUTABLE})")
+
+    # `clang -target bpf` does not define the host architecture macros, so glibc's
+    # <gnu/stubs.h> (pulled in transitively via standard headers) falls through to
+    # the 32-bit stub <gnu/stubs-32.h>. That stub is not installed on 64-bit-only
+    # distros such as Amazon Linux 2023 (glibc-devel.i686 / i686 multilib is not
+    # available), so the BPF compile fails with "'gnu/stubs-32.h' file not found".
+    # Define the host arch + __LP64__ so stubs.h selects the present 64-bit stub.
+    # Kept arch-portable because gwlbtun also builds on Graviton (aarch64).
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+        set(EBPF_ARCH_DEFINES -D__x86_64__ -D__LP64__)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+        set(EBPF_ARCH_DEFINES -D__aarch64__ -D__LP64__)
+    else()
+        set(EBPF_ARCH_DEFINES -D__LP64__)
+    endif()
+
+    # Compile the eBPF program (tc clsact ingress + egress) to a BPF object file.
+    add_custom_target(gwlbtun-ebpf.o ALL
+            COMMAND ${CLANG_EXECUTABLE} -O2 -g -Wall -target bpf ${EBPF_ARCH_DEFINES} -c ${CMAKE_CURRENT_SOURCE_DIR}/EbpfHelpers.c -o ${CMAKE_CURRENT_BINARY_DIR}/gwlbtun-ebpf.o
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/EbpfHelpers.c ${CMAKE_CURRENT_SOURCE_DIR}/EbpfHelpers.h ${CMAKE_CURRENT_SOURCE_DIR}/GeneveStructs.h
+            COMMENT "Compiling eBPF program (gwlbtun-ebpf.o)"
+            VERBATIM)
+    add_dependencies(gwlbtun gwlbtun-ebpf.o)
+
+    target_include_directories(gwlbtun PRIVATE ${LIBBPF_INCLUDE_DIRS})
+    target_compile_definitions(gwlbtun PRIVATE ENABLE_EBPF)
+    target_link_libraries(gwlbtun ${LIBBPF_LIBRARIES})
+
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/gwlbtun-ebpf.o
+            DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/gwlbtun
+            PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
+else()
+    message(STATUS "eBPF support disabled (needs libbpf-devel and clang). gwlbtun will process all packets in userspace.")
+endif()
