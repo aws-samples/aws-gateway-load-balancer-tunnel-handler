@@ -42,7 +42,7 @@ gwlbtun can be launched in several different ways - native CLI or in a container
 
 For Linux, the application requires CAP_NET_ADMIN capability to create the tunnel interfaces along with the example helper scripts.
 ```
-AWS Gateway Load Balancer Tunnel Handler v3.2
+AWS Gateway Load Balancer Tunnel Handler v4.0
 Usage: ./gwlbtun [options]
 Example: ./gwlbtun
 
@@ -56,6 +56,8 @@ Example: ./gwlbtun
   -j         For health check detailed statistics, output as JSON instead of text.  
   -s         Only return simple health check status (only the HTTP response code), instead of detailed statistics.
   -d         Enable debugging output. Short version of --logging all=debug.
+  -e OBJFILE Load the eBPF program from OBJFILE to accelerate known-flow packet processing in-kernel (tc clsact ingress + egress).
+  -I IFNAME  Attach the eBPF ingress program to IFNAME instead of auto-detecting the default-route NIC. Use when GWLB traffic arrives on a dedicated ENI separate from the management interface. (--ebpf-interface)
 
 Threading options:
   --udpthreads NUM         Generate NUM threads for the UDP receiver.
@@ -95,7 +97,7 @@ The <X> in the interface name is replaced with the base 60 encoded ENI ID (to fi
 device name limit).
 ---------------------------------------------------------------------------------------------------------
 The logging configuration can be set by passing a string to the --logging option. That string is a series of <section>=<level>, comma separated and case insensitive.
-The available sections are: core udp geneve tunnel healthcheck os all 
+The available sections are: core udp geneve tunnel healthcheck os ebpf all 
 The logging levels available for each are: critical important info debug debugdetail 
 The default level for all sections is 'important'.
 ```
@@ -297,8 +299,24 @@ After XPS:
 
 ## Advanced usages
 
-### eBPF/XDP acceleration (experimental)
-If `libbpf` (libbpf-devel) and `clang` are installed, the CMake build detects them, compiles the eBPF/XDP program `gwlbtun-ebpf.o`, and builds gwlbtun with eBPF support enabled. Pass the object with `-e <path>/gwlbtun-ebpf.o` and run with the `CAP_BPF`/`CAP_NET_ADMIN` capabilities to have gwlbtun load the program and attach it to the GWLB-facing interface. For flows it recognizes, the inner packet is decapsulated and redirected to the `gwi` interface entirely in-kernel, bypassing the userspace UDP-socket/TUN round-trip; unknown flows fall through to normal userspace processing. This is intended to improve throughput in high packet-rate scenarios. This path is experimental and under active development — control-plane population of the flow map, the return (`gwo`) path, and multi-interface attach are not yet complete.
+### eBPF/XDP acceleration (v4.0, in development)
+
+gwlbtun 4.0 adds an optional in-kernel fast path for established flows, built as a companion eBPF object (`gwlbtun-ebpf.o`) that gwlbtun loads and attaches at runtime. It is strictly an accelerator: anything the fast path does not recognize or cannot handle falls through to the normal userspace processing, so behavior is unchanged when eBPF is disabled or when a packet misses.
+
+**Building it.** If `clang` and `libbpf` (`libbpf-devel`) are present, CMake auto-detects them, compiles `gwlbtun-ebpf.o`, and builds gwlbtun with eBPF support (you will see `-- eBPF support enabled` in the CMake output). Without them, gwlbtun builds exactly as before and processes everything in userspace. On Amazon Linux 2023:
+```
+sudo dnf install -y clang libbpf-devel
+cmake3 . && make
+```
+
+**Running it.** Pass the object with `-e <path>/gwlbtun-ebpf.o`. gwlbtun needs `CAP_BPF` and `CAP_NET_ADMIN` (run as root, or grant those capabilities) to load the program and attach the tc hooks. By default it attaches the ingress program to the default-route NIC; use `-I <ifname>` (`--ebpf-interface`) when GWLB traffic arrives on a dedicated ENI separate from the management interface.
+```
+sudo ./gwlbtun -c ./create-passthrough.sh -p 8060 -e ./gwlbtun-ebpf.o -I ens5
+```
+
+**What it does.** On the GWLB-facing interface, a tc-clsact **ingress** program parses GENEVE and, for a flow present in its BPF map, decapsulates and redirects the inner packet straight to the matching `gwi` interface — skipping the userspace UDP-socket/TUN round-trip. A tc **egress** program on `gwo` re-encapsulates return traffic (using a cached return L2 header) and sends it back to GWLB in-kernel. gwlbtun's userspace stays the control plane: it learns new flows on their first packet, populates the maps, and ages idle flows out using the in-kernel liveness timestamps. Known-flow counters and loader status are surfaced in the health check output (the `ebpf` section).
+
+**Status.** The ingress and egress fast paths and the control-plane map population are implemented and are being validated on live GWLB traffic; the eBPF datapath is opt-in and should be treated as in-development for 4.0. Two dispositions (`DISP_FORWARD` and `DISP_DROP`) are reserved in the datapath for a future conntrack-driven offload but are not yet implemented — such flows simply take the normal path today.
 
 ### No return mode
 If you are only interested in the ability to receive traffic to an L3 tunnel interface, and will never send traffic back to GWLB, you can #define NO_RETURN_TRAFFIC in utils.h. This removes the gwo interfaces and all cookie flow tracking, which saves on time used to synchronize that flow tracking table. Note that this puts your appliance in a two-arm mode with GWLB, and also may result in asymmetric traffic routing, which may have performance implications elsewhere. 
