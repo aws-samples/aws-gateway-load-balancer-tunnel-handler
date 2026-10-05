@@ -13,12 +13,17 @@ sudo yum install cmake3
 
 In the directory with the source code, do ```cmake3 .; make``` to build. This code works with both Intel and Graviton-based architectures.
 
-**This version requires the Boost libraries, version 1.83.0 or greater.** This tends to be a newer version than available on distributions (for example, at time of writing, 1.75 is available in AL2023). You may need to go to https://www.boost.org/, download, and install a newer version than what's available in the repositories. Note that only the headers are needed - you do not need to go through Boost compilation. The cmake file looks for the source to be extracted into /home/ec2-user/boost - you can change this path by changing the `Boost_INCLUDE_DIR` value in CMakeLists.txt before running `cmake3`.  
+**This version has integrated Boost libraries from 1.92 - no additional Boost download is required (as opposed to previous versions).**
 
 ## Usage
+
+gwlbtun can be launched in several different ways - native CLI or in a container. 
+
+### Native CLI
+
 For Linux, the application requires CAP_NET_ADMIN capability to create the tunnel interfaces along with the example helper scripts.
 ```
-Tunnel Handler for AWS Gateway Load Balancer
+AWS Gateway Load Balancer Tunnel Handler v3.2
 Usage: ./gwlbtun [options]
 Example: ./gwlbtun
 
@@ -27,6 +32,7 @@ Example: ./gwlbtun
   -r FILE    Command to execute when a tunnel times out and is about to be destroyed. See below for arguments passed.
   -t TIME    Minimum time in seconds between last packet seen and to consider the tunnel timed out. Set to 0 (the default) to never time out tunnels.
              Note the actual time between last packet and the destroy call may be longer than this time.
+  -i TIME    Idle timeout for the TCP flow cache. Set this to match what GWLB is configured for. Defaults to 350 seconds. UDP and Other flow caches use a fixed 120 second idle timeout.
   -p PORT    Listen to TCP port PORT and provide a health status report on it.
   -j         For health check detailed statistics, output as JSON instead of text.  
   -s         Only return simple health check status (only the HTTP response code), instead of detailed statistics.
@@ -38,9 +44,20 @@ Threading options:
   --tunthreads NUM         Generate NUM threads for each tunnel processor.
   --tunaffinity AFFIN      Generate threads for each tunnel processor, pinned to the cores listed. Takes precedence over tunthreads.
 
+Performance options:
+  --rcvbuf SIZE            Socket receive buffer size in megabytes. Default is 128MB.
+                           For 50+ Gbps throughput, use 128-256MB. Requires net.core.rmem_max sysctl >= SIZE*1024*1024.
+  --busypoll USEC          Busy-poll the NIC up to USEC microseconds per receive (lower latency, higher CPU).
+                           Default 0 (disabled). Try 50 for latency-sensitive high packet rates.
+  --reserve RESV           Pre-size the flow caches to avoid rehash stalls under high flow counts.
+                           RESV is six comma-separated entry counts in order v4TCP,v4UDP,v4Other,v6TCP,v6UDP,v6Other
+                           (0 = don't pre-size that cache). Default 16384,16384,1024,1024,1024,1024.
+                           Prefix with 'vpce-<id>:' to override a specific GWLB endpoint; repeat for several.
+                           e.g. --reserve 5000000,50000,50000,20,20,20 --reserve vpce-0abc...:2000000,2000000,1024,1024,1024,1024
+
 AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.
 It is recommended to have the same number of UDP threads as tunnel processor threads, in one-arm operation.
-If unspecified, --udpthreads <N> and --tunthreads <N> will be assumed as a default, based on the number of cores present.
+If unspecified, the thread argument(s) will assume <N> as a default, based on the number of cores present.
 
 Logging options:
   --logging CONFIG         Set the logging configuration, as described below.
@@ -59,10 +76,140 @@ The <X> in the interface name is replaced with the base 60 encoded ENI ID (to fi
 device name limit).
 ---------------------------------------------------------------------------------------------------------
 The logging configuration can be set by passing a string to the --logging option. That string is a series of <section>=<level>, comma separated and case insensitive.
-The available sections are: core udp geneve tunnel healthcheck all 
+The available sections are: core udp geneve tunnel healthcheck os all 
 The logging levels available for each are: critical important info debug debugdetail 
-The default level for all secions is 'important'.
+The default level for all sections is 'important'.
 ```
+
+### Docker
+The Dockerfile builds a container image for the GWLB tunnel handler:
+
+```dockerfile
+FROM amazonlinux:2023.6.20250203.1
+
+RUN yum update; yum install -y iproute-tc iptables tcpdump iputils procps
+
+COPY example-scripts/* .
+COPY gwlbtun .
+
+ENTRYPOINT ["./gwlbtun"] 
+CMD ["-c", "./create-route.sh", "-p", "8060"]
+````
+#### Key Components:
+
+  - Build Stage :
+    - Uses golang:1.20-alpine as builder image
+    - Compiles the application with CGO disabled
+    - Builds for Linux platform
+  - Final Stage :
+    - Based on Alpine 3.18
+    - Installs required packages (iproute2, bash, iptables)
+    - Copies binary and scripts from builder
+    - Sets up entrypoint and default command
+
+### DaemonSet Configuration (gwlbtun-ds.yaml)
+The DaemonSet ensures that the tunnel handler runs on each node in the Kubernetes cluster.
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gwlbtun-node
+spec:
+  selector:
+    matchLabels:
+      app: gwlbtun-node
+  template:
+    metadata:
+      labels:
+        app: gwlbtun-node
+        component: network
+    spec:
+      containers:
+      - image: "[docker image]"
+        imagePullPolicy: IfNotPresent
+        name: gwlbtun
+        command:
+        - ./gwlbtun
+        - -c
+        - ./create-route.sh
+        - -p
+        - "8060"
+        resources:
+          requests:
+            cpu: 10m
+            memory: 300Mi
+        securityContext:
+          privileged: true
+          capabilities:
+            add: ["NET_ADMIN"]
+      hostNetwork: true
+      hostPID: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      restartPolicy: Always
+```
+#### Key Components:
+  - DaemonSet Name : gwlbtun-node
+  - Container Configuration :
+    -  Port: 8060
+    - Resource requests: 10m CPU, 300Mi memory
+    - Runs with privileged access and NET_ADMIN capabilities
+    - Uses host network and PID namespace
+  - Node Selection : Runs only on Linux nodes
+  - Restart Policy : Always restarts on failure
+
+### Prerequisites
+- Kubernetes cluster with Linux nodes
+- kubectl configured with cluster access
+- Docker registry access
+
+### Deployment Steps
+1. Build and push the Docker image:
+
+```bash
+# Build the Docker image
+docker build -t your-registry/gwlbtun:tag .
+
+# Push to your registry
+docker push your-registry/gwlbtun:tag
+```
+2. Update the image reference in gwlbtun-ds.yaml:
+
+```yaml
+image: "your-registry/gwlbtun:tag"
+```
+
+3. Apply the DaemonSet:
+
+```bash
+kubectl apply -f gwlbtun-ds.yaml
+```
+
+Verification
+Check if the DaemonSet pods are running:
+
+```bash
+kubectl get pods -l app=gwlbtun-node
+```
+
+Monitoring
+Monitor the tunnel handler logs:
+
+```bash
+kubectl logs -l app=gwlbtun-node
+```
+Configuration Parameters
+- -c: Path to the route creation script
+
+- -p: Port number for the tunnel handler (default: 8060)
+
+Security Considerations
+The DaemonSet runs with privileged access
+
+NET_ADMIN capability is required for network operations
+
+Consider implementing network policies for additional security.
 
 ## Source code layout
 main.cpp contains the start of the code, but primarily interfaces with GeneveHandler, defined in GeneveHandler.cpp. 
@@ -75,6 +222,23 @@ Logger handles processing logging messages from all threads, ensuring they get o
 gwlbtun supports multithreading, and doing so is recommended on multicore systems. You can specify either the number or threads, or a specific affinity for CPU cores, for both the UDP receiver and the tunnel handler threads. You should test to see which set of options work best for your workload, especially if you have additional processes doing processing on the device. By default, gwlbtun will create one UDP receive thread and one tunnel processing thread per core. 
 
 gwlbtun labels its threads with its name (gwlbtun), and either Uxxx for the UDP threads option which is simply an index, or UAxxx for the UDP affinity option, with the number being the core that thread is set for. The tunnel threads are labeled the same, except with a T instead of a U.
+
+## Tested performance numbers
+Since it's initial release, gwlbtun has had many improvements to its packet processing. More are planned for the upcoming 4.0 branch (which includes eBPF acceleration). Comparing some prior versions (2022.11 pre-Boost, 3.0, and now 3.2):
+
+| Frame size | 2022.11 (pre-Boost) | v3.0 | v3.2 | pre-Boost &rarr; v3.2 |
+|------------|--------------------:|-----:|-----:|:---------------------:|
+| 64 B   |  99k pps | 173k pps | 291k pps | 2.9&times; |
+| 128 B  |  98k pps | 174k pps | 303k pps | 3.1&times; |
+| 256 B  |  97k pps | 189k pps | 309k pps | 3.2&times; |
+| 512 B  | 108k pps | 183k pps | 308k pps | 2.9&times; |
+| 1024 B | 110k pps | 193k pps | 300k pps | 2.7&times; |
+| 1280 B | 109k pps | 198k pps | 297k pps | 2.7&times; |
+| 1518 B | 112k pps | 196k pps | 294k pps | 2.6&times; |
+
+The move to the concurrent hash map (v3.0) delivered roughly a 1.8&times; increase in sustained forwarding rate over the original design, and the subsequent tuning through v3.2 added another ~1.6&times;, compounding to about 2.9&times; over the 2022.11 baseline. The gains are largest for small frames, where per-packet cache overhead dominates.
+
+**Test setup:** gwlbtun ran on a single **c6in.xlarge** behind a Gateway Load Balancer, with a TRex load generator (c6in.4xlarge) driving UDP traffic through the GWLB endpoint and back in a loopback topology. Each trial offered a fixed packet rate for 15 seconds across roughly 59,000 concurrent flows (randomized source port). The figure reported is the *delivered* forwarding ceiling - the highest sustained packets-per-second gwlbtun actually returned - taken as the maximum across an offered-load sweep of 0.5-8 Mpps. These are a relative comparison on identical hardware and topology; absolute numbers will vary with instance type, flow count, frame size, and configuration.
 
 ## Kernel sysctls
 Because most usages of gwlbtun have it sitting in the middle of a communications path (bump in the wire), none of the traffic is directly destined for it. Thus, in most cases, you should disable the reverse path filter (rp_filter) on associated GWI interfaces, in order for the kernel to allow the traffic through. The hook scripts are a good place to do this (the input interface is passed as $2) and the examples in example-scripts show different ways. One option:
@@ -155,3 +319,29 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+### Boost libraries
+
+Boost Software License - Version 1.0 - August 17th, 2003
+
+Permission is hereby granted, free of charge, to any person or organization
+obtaining a copy of the software and accompanying documentation covered by
+this license (the "Software") to use, reproduce, display, distribute,
+execute, and transmit the Software, and to prepare derivative works of the
+Software, and to permit third-parties to whom the Software is furnished to
+do so, all subject to the following:
+
+The copyright notices in the Software and this entire statement, including
+the above license grant, this restriction and the following disclaimer,
+must be included in all copies of the Software, in whole or in part, and
+all derivative works of the Software, unless such copies or derivative
+works are solely in the form of machine-executable object code generated by
+a source language processor.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NON-INFRINGEMENT. IN NO EVENT
+SHALL THE COPYRIGHT HOLDERS OR ANYONE DISTRIBUTING THE SOFTWARE BE LIABLE
+FOR ANY DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.

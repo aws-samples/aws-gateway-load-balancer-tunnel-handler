@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 
 # This version of the create-nat script deals with multiple endpoints that may have overlapping IP CIDR ranges.
 

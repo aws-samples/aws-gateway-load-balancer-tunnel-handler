@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * PacketHeaderV4 class serves to interpret and provide a hashing function for an IPv6 header, looking at similiar fields
+ * PacketHeaderV6 class serves to interpret and provide a hashing function for an IPv6 header, looking at similiar fields
  * to what GWLB does when producing a flow cookie.
  */
 
@@ -49,9 +49,8 @@ PacketHeaderV6::PacketHeaderV6(unsigned char *pktbuf, ssize_t pktlen)
             throw std::invalid_argument("PacketHeaderV6 provided a packet with protocol=TCP/UDP, but too small to carry port information.");
         
         // Ports are at same offset for both TCP and UDP
-        uint16_t *ports = (uint16_t *)(pktbuf + sizeof(struct ip6_hdr));
-        srcpt = be16toh(ports[0]);
-        dstpt = be16toh(ports[1]);
+        srcpt = be16toh_unaligned(pktbuf + sizeof(struct ip6_hdr));
+        dstpt = be16toh_unaligned(pktbuf + sizeof(struct ip6_hdr) + 2);
     }
     else
     {

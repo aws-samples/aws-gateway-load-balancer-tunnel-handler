@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.13)
 project(gwlbtun)
 set(CMAKE_CXX_STANDARD 17)
+
+# Vendored header-only third-party libraries (Boost subset via bcp, nlohmann/json).
+# SYSTEM so their headers don't trip our -Wall -Wextra -Wshadow=local, and so <boost/...> /
+# <json/json.hpp> resolve (Boost headers cross-include via <boost/...>, which needs the
+# vendor root on the include path). No external Boost install / find_package required.
+include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/third_party)
+
 find_package(Threads)
 
 # Get git commit information
@@ -58,13 +65,13 @@ configure_file(
     @ONLY
 )
 
-set(Boost_INCLUDE_DIR /home/ec2-user/boost)
-find_package(Boost 1.83 REQUIRED)
-if(Boost_FOUND)
-    include_directories(${Boost_INCLUDE_DIRS})
-endif()
-
-set(CMAKE_CXX_FLAGS "-Wall -Wextra")
+# -Wshadow=local (not bare -Wshadow): warn when a local/parameter shadows another
+# local/parameter, but NOT when a parameter shadows a member or global. The codebase
+# deliberately names constructor parameters after the members they initialize
+# (member-init-list idiom, e.g. FlowCache / *HealthCheck ctors), which is safe; bare
+# -Wshadow floods on that pattern and trains the warning to be ignored. =local keeps the
+# signal that matters -- a local shadowing another local (the real footgun class).
+set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wshadow=local")
 set(CMAKE_CXX_FLAGS_RELEASE "-Ofast")
 
 set(CMAKE_CXX_FLAGS_DEBUG "-fstack-protector-all -fsanitize=address -pg -O0 -g")

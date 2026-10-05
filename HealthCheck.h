@@ -5,7 +5,7 @@
 #ifndef GWLBTUN_HEALTHCHECK_H
 #define GWLBTUN_HEALTHCHECK_H
 
-#include "json.hpp"
+#include <json/json.hpp>
 using json = nlohmann::json;
 
 class HealthCheck {

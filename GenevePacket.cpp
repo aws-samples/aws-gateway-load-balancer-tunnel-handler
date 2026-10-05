@@ -27,7 +27,7 @@ GenevePacket::GenevePacket() : status(GP_STATUS_EMPTY) { }
  * @param pktLen Length of pktBuf
  */
 GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
-        : status(GP_STATUS_EMPTY), gwlbeEniIdValid(false), attachmentIdValid(false), flowCookieValid(false)
+        : status(GP_STATUS_EMPTY), gwlbeEndpointIdValid(false), attachmentIdValid(false), flowCookieValid(false)
 {
     // Fast path checks with branch prediction hints
     if(__builtin_expect(pktLen < 8, 0))
@@ -44,7 +44,7 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
     }
 
     // Ethertype check - load as uint16_t directly
-    uint16_t ethertype = be16toh(*(uint16_t *)&pktBuf[2]);
+    uint16_t ethertype = be16toh_unaligned(&pktBuf[2]);
     if(__builtin_expect(ethertype != ETH_P_IP && ethertype != ETH_P_IPV6, 0))
     {
         status = GP_STATUS_BAD_ETHERTYPE;
@@ -68,38 +68,47 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
     
     while(pktPtr < pktEnd)
     {
-        // Parse option header. See RFC 8926 section 3.5.
-        uint16_t optClass = be16toh(*(uint16_t *)&pktPtr[0]);
+        // Need at least 4 bytes left for the option header itself. See RFC 8926 section 3.5.
+        if(pktPtr + 4 > pktEnd)
+            break;
+        uint16_t optClass = be16toh_unaligned(&pktPtr[0]);
         uint8_t optType = pktPtr[2];
-        uint8_t optLen = (pktPtr[3] & 0x1f) * 4;
+        uint8_t optDataLen = (pktPtr[3] & 0x1f) * 4;
+        // The option's declared data length must also fit within the remaining option region,
+        // otherwise a malformed/truncated packet could read past it into stale buffer bytes.
+        if(pktPtr + 4 + optDataLen > pktEnd)
+            break;
         unsigned char *optData = &pktPtr[4];
 
         // Check for AWS specific options for GWLB (class 0x108)
         if(__builtin_expect(optClass == 0x108, 1))
         {
-            if(optType == 1 && optLen == 8)
+            if(optType == 1 && optDataLen == 8)
             {
-                gwlbeEniIdValid = true;
-                gwlbeEniId = be64toh(*(uint64_t *)optData);
+                // Class 0x0108, type 1: the GWLB endpoint (VPC endpoint, "vpce-")
+                // identifier the flow arrived through -- NOT the ENI of that endpoint.
+                // Carried as a 64-bit value; rendered as hex (see MakeGwlbeStr).
+                gwlbeEndpointIdValid = true;
+                gwlbeEndpointId = be64toh_unaligned(optData);
             }
-            else if(optType == 2 && optLen == 8)
+            else if(optType == 2 && optDataLen == 8)
             {
                 attachmentIdValid = true;
-                attachmentId = be64toh(*(uint64_t *)optData);
+                attachmentId = be64toh_unaligned(optData);
             }
-            else if(optType == 3 && optLen == 4)
+            else if(optType == 3 && optDataLen == 4)
             {
                 flowCookieValid = true;
-                flowCookie = be32toh(*(uint32_t *)optData);
+                flowCookie = be32toh_unaligned(optData);
             }
         }
-        pktPtr += 4 + optLen;
+        pktPtr += 4 + optDataLen;
     }
 
     headerLen = 8 + optLen;
 
     // If the three mandatory options for GWLB weren't seen, this can't be a valid packet from it.
-    if(__builtin_expect(!gwlbeEniIdValid || !attachmentIdValid || !flowCookieValid, 0))
+    if(__builtin_expect(!gwlbeEndpointIdValid || !attachmentIdValid || !flowCookieValid, 0))
         status = GP_STATUS_MISSING_GWLB_OPTIONS;
     else
         status = GP_STATUS_OK;
@@ -108,7 +117,7 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
 std::string GenevePacket::text()
 {
     std::ostringstream ss;
-    ss << " Status: " << (status) << std::hex << " GWLBe ENI ID: " << (MakeENIStr(gwlbeEniIdValid?gwlbeEniId:0)) << " Attachment ID: " << (attachmentIdValid?attachmentId:0) << " Flow Cookie: " << (flowCookieValid?flowCookie:0) << std::dec;
+    ss << " Status: " << (status) << std::hex << " GWLBe endpoint: vpce-" << (MakeGwlbeStr(gwlbeEndpointIdValid?gwlbeEndpointId:0)) << " Attachment ID: " << (attachmentIdValid?attachmentId:0) << " Flow Cookie: " << (flowCookieValid?flowCookie:0) << std::dec;
     return ss.str();
 }
 
@@ -121,6 +130,6 @@ std::string GenevePacket::text()
  */
 auto operator<<(std::ostream& os, GenevePacket const& m) -> std::ostream&
 {
-    return os << " Status: " << (m.status) << std::hex << " GWLBe ENI ID: " << (MakeENIStr(m.gwlbeEniIdValid?m.gwlbeEniId:0)) << " Attachment ID: " << (m.attachmentIdValid?m.attachmentId:0) << " Flow Cookie: " << (m.flowCookieValid?m.flowCookie:0) << std::dec;
+    return os << " Status: " << (m.status) << std::hex << " GWLBe endpoint: vpce-" << (MakeGwlbeStr(m.gwlbeEndpointIdValid?m.gwlbeEndpointId:0)) << " Attachment ID: " << (m.attachmentIdValid?m.attachmentId:0) << " Flow Cookie: " << (m.flowCookieValid?m.flowCookie:0) << std::dec;
 }
 

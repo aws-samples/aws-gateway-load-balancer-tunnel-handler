@@ -1,4 +1,17 @@
-## Current Development Branch (v3.1):
+## v3.2:
+- Corrected terminology: the GENEVE Option Class 0x0108 type-1 field is the GWLB **endpoint** (VPC endpoint, `vpce-`) identifier, not the ENI of that endpoint. Logs and health output now label it "GWLB endpoint" and show the `vpce-` prefix. **Health JSON change:** the per-ENI object's `eniStr` key is renamed to `gwlbEndpointId` (value now `vpce-`-prefixed) - update any tooling that parses the health JSON.
+- Vendored a header-only subset of Boost (1.92) and nlohmann/json into `third_party/`, so the build no longer needs a separate Boost download or install - `cmake3 . && make` is self-contained on a stock Amazon Linux host (#24, #25, thanks @lyoung-confluent).
+- recvmmsg() batch receive on the UDP ingress path, configurable SO_RCVBUF, and reduced shutdown latency for higher throughput (#21, thanks @nikvouk-aws).
+- Flow cache split into separate TCP/UDP/Other tables, with a configurable TCP idle timeout via `-i TIME` to match the GWLB flow timeout (UDP and Other use a fixed 120-second idle timeout).
+- New `--busypoll USEC` option to busy-poll the NIC on the UDP ingress path for lower latency under high packet rates (default off).
+- High-scale flow-cache optimizations: a coarse (1-second) idle timer refreshed in place, flow-cache expiry on a dedicated reaper thread off the health path, optional `--reserve` pre-sizing of the per-table caches, and cache-line isolation of the hot per-ENI counters. Measured on the test rig (256 B, single appliance): no-drop throughput on par with the prior split-cache build (~300k pps) with the tightest latency tail of the builds compared (worst case ~1.7 ms under overload vs ~2.9-5.0 ms before), and ~0% loss at/under the no-drop ceiling. Also fixes a latent shutdown-ordering use-after-free (tunnel threads outliving the flow caches they read), which `--reserve` turned from benign into a reliable crash.
+- Raised the GWI/GWO tunnel MTU to carry 8500-byte payloads (8500 + 68 B GENEVE + 28 B UDP headers), matching GWLB's maximum.
+- IPv4/IPv6 dual-stack health-check listener (works on RHEL 10+, where the previous socket setup failed).
+- Container image and Kubernetes DaemonSet manifest (#13, thanks @ahmetayd).
+- Reliability and portability hardening: fixed data races flagged by ThreadSanitizer, replaced unaligned reads of on-the-wire fields with well-defined accesses, now compute and report real health status (#34), route SIGTERM cleanly through the shutdown handler, and build with `-Wshadow` in the always-on warning set.
+- Fixes: malformed health-check JSON (#26), uninitialized health socket busy-loop (#29), uninitialized outer UDP checksum (#28), Geneve per-option bounds check (#31), socket/write return-value handling (#32), fd cleanup on ENI teardown (#36), compiler warnings (#33), and build hygiene (#24, #25) - thanks @lyoung-confluent.
+
+## Public Development v3.1:
 - Performance improvements to /dev/net/tun handling, packet manipulation, and memory usage. The improvements help more on higher CPU core counts - at 4 cores, the improvements result in approximately 4.3% improvement as measured by packets per second, but at 32 cores it's 37.2% more.
 - Clean up /dev/net/tun fd handling to reduce file descriptor count
 - Improved flow cookie tracker hashing algorithm to reduce collisions in high cps, low entropy scenarios.

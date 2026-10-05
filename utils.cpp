@@ -8,6 +8,7 @@
 #include "utils.h"
 
 #include <cstring>
+#include <ctime>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
@@ -99,6 +100,7 @@ bool sendUdpSG(int sock, struct in_addr from_addr, uint16_t from_port,
     headers.udp.source = htons(from_port);
     headers.udp.dest = htons(to_port);
     headers.udp.len = htons(sizeof(struct udphdr) + total_payload);
+    headers.udp.check = 0;   // 0 = no UDP checksum (valid for IPv4). The kernel does not compute it for raw IP_HDRINCL sockets, so an unset field would ship stack garbage.
 
     // Build iovec array: headers + payload segments
     struct iovec iov[payload_iovcnt + 1];
@@ -248,11 +250,12 @@ void ParseThreadConfiguration(int threadcount, std::string& affinity, ThreadConf
 }
 
 /**
- * Convert an eniid_t to a hex string
+ * Convert a GWLB endpoint id to its hex string. Rendered as 17-char zero-padded
+ * hex, matching the "vpce-" endpoint id as shown in the AWS console.
  * @param eni
  * @return
  */
-std::string MakeENIStr(eniid_t eni)
+std::string MakeGwlbeStr(gwlbeid_t eni)
 {
     std::stringstream ss;
 
@@ -260,3 +263,30 @@ std::string MakeENIStr(eniid_t eni)
     return ss.str();
 }
 
+
+
+
+// --- Coarse monotonic clock (see utils.h) -----------------------------------
+std::atomic<uint32_t> g_coarseSec{0};
+static struct timespec g_coarseStart;
+
+// CLOCK_BOOTTIME keeps advancing while the system is suspended; fall back to
+// CLOCK_MONOTONIC where it isn't available.
+#ifdef CLOCK_BOOTTIME
+static const clockid_t g_coarseClockId = CLOCK_BOOTTIME;
+#else
+static const clockid_t g_coarseClockId = CLOCK_MONOTONIC;
+#endif
+
+void initCoarseClock()
+{
+    clock_gettime(g_coarseClockId, &g_coarseStart);
+    g_coarseSec.store(0, std::memory_order_relaxed);
+}
+
+void updateCoarseClock()
+{
+    struct timespec now;
+    clock_gettime(g_coarseClockId, &now);
+    g_coarseSec.store((uint32_t)(now.tv_sec - g_coarseStart.tv_sec), std::memory_order_relaxed);
+}

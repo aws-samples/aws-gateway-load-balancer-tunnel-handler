@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 
 echo "==> Setting up simple passthrough"
 echo Mode is $1, In Int is $2, Out Int is $3, ENI is $4

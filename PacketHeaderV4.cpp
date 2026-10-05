@@ -32,8 +32,8 @@ PacketHeaderV4::PacketHeaderV4(unsigned char *pktbuf, ssize_t pktlen)
         throw std::invalid_argument("PacketHeaderV4 provided a packet that isn't IPv4.");
 
     prot = iph->ip_p;
-    src = be32toh(*(uint32_t *)&iph->ip_src);
-    dst = be32toh(*(uint32_t *)&iph->ip_dst);
+    src = be32toh_unaligned(&iph->ip_src);
+    dst = be32toh_unaligned(&iph->ip_dst);
     
     // Most traffic is TCP or UDP - optimize for that
     if(__builtin_expect(prot == IPPROTO_UDP || prot == IPPROTO_TCP, 1))
@@ -42,9 +42,8 @@ PacketHeaderV4::PacketHeaderV4(unsigned char *pktbuf, ssize_t pktlen)
             throw std::invalid_argument("PacketHeaderV4 provided a packet with protocol=TCP/UDP, but too small to carry port information.");
         
         // Ports are at same offset for both TCP and UDP
-        uint16_t *ports = (uint16_t *)(pktbuf + sizeof(struct ip));
-        srcpt = be16toh(ports[0]);
-        dstpt = be16toh(ports[1]);
+        srcpt = be16toh_unaligned(pktbuf + sizeof(struct ip));
+        dstpt = be16toh_unaligned(pktbuf + sizeof(struct ip) + 2);
     }
     else
     {

@@ -55,6 +55,8 @@ TunInterface::TunInterface(std::string devname, int mtu, ThreadConfig threadConf
     ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
 
     int dummy = socket(PF_INET, SOCK_DGRAM, 0);
+    if(dummy < 0)
+        throw std::system_error(errno, std::generic_category(), "Unable to create dummy socket to configure device");
     if(ioctl(dummy, SIOCGIFFLAGS, (void *)&ifr) < 0) {
         close(dummy);
         throw std::system_error(errno, std::generic_category(), "Unable to get device flags");
@@ -110,6 +112,20 @@ void TunInterface::shutdown()
         if(!allgood)
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
+}
+
+/**
+ * Check that all of this interface's started reader threads are still alive.
+ *
+ * @return true if every started thread is still running, false otherwise.
+ */
+bool TunInterface::healthCheck()
+{
+    bool status = true;
+    for(auto &t : threads)
+        if(t.setupCalled && !t.healthCheck())
+            status = false;
+    return status;
 }
 
 /**
@@ -237,6 +253,14 @@ int TunInterfaceThread::threadFunction()
         {
             // The tun interface has received packets. Drain all, dispatching each.
             msgLen = read(fd, pktbuf, 65534);   // Remember: TUN devices always return 1 and only 1 packet on read()
+            if(msgLen <= 0)
+            {
+                // Negative = read error; zero = spurious empty read. Nothing to dispatch, and a negative
+                // length passed downstream would corrupt the byte counters.
+                if(msgLen < 0)
+                    LOG(LS_TUNNEL, LL_DEBUG, "read() on tun device "s + ts(fd) + " failed: "s + std::error_code{errno, std::generic_category()}.message());
+                continue;
+            }
             lastPacket = std::chrono::steady_clock::now();
             try {
                 recvDispatcher(pktbuf, msgLen);

@@ -86,10 +86,10 @@ private:
     std::atomic<uint64_t> pktsIn, pktsOut, bytesIn, bytesOut;
     tunCallback recvDispatcher;
     TunSocket tunSocket;
-    bool shutdownRequested;
+    std::atomic<bool> shutdownRequested;
     int threadNumber;
     int coreNumber;
-    pid_t threadId;
+    std::atomic<pid_t> threadId;
     std::future<int> thread;
     int threadFunction();
 };
@@ -113,6 +113,7 @@ public:
     ~TunInterface();
 
     void writePacket(unsigned char *pkt, ssize_t pktlen);
+    bool healthCheck();
     TunInterfaceHealthCheck status();
     void shutdown();
 

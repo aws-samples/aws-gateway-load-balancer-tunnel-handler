@@ -19,7 +19,7 @@ static const std::array<std::string, LL_COUNT> loggingLevels = {
 };
 
 Logger::Logger(std::string loggingOptions) :
-    cfg(optionsParse(loggingOptions)), shouldTerminate(false), thread(&Logger::threadFunc, this), thread_ready(false)
+    cfg(optionsParse(loggingOptions)), shouldTerminate(false), thread_ready(false), thread(&Logger::threadFunc, this)
 {
     // Wait for the logging thread to be ready before returning
     std::unique_lock<std::mutex> lock(startup_mutex);
@@ -28,8 +28,18 @@ Logger::Logger(std::string loggingOptions) :
 
 Logger::~Logger()
 {
-    shouldTerminate = true;
+    // Join the logging thread before our queue/mutex/condvar members are
+    // destroyed. threadFunc() touches all three every iteration, so returning
+    // without a join would (a) let it run on with freed state and (b) destroy a
+    // still-joinable std::thread, which calls std::terminate(). Set the flag
+    // under queue_mutex so the notify can't be lost against threadFunc's wait().
+    {
+        std::lock_guard<std::mutex> lk(queue_mutex);
+        shouldTerminate = true;
+    }
     queue_condvar.notify_one();
+    if(thread.joinable())
+        thread.join();
 }
 
 std::string Logger::help()

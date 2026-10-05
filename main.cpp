@@ -6,12 +6,18 @@
 #include <iostream>
 #include <unistd.h>
 #include <getopt.h>
+#include <sys/socket.h>
 #include "GeneveHandler.h"
+#include "GwlbtunConfig.h"
+#include <thread>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <sstream>
 #include <fstream>
 #include "utils.h"
 #include <csignal>
+#include <atomic>
 #include <cstring>
 #include "Logger.h"
 
@@ -19,7 +25,7 @@ using namespace std::string_literals;
 
 std::string newCmd = "";
 std::string delCmd = "";
-volatile sig_atomic_t keepRunning = 1;
+std::atomic<bool> keepRunning{true};
 
 /**
  * Callback function for when a new GWLB endpoint has been detected by GeneveHandler. Prints a message and calls the create script.
@@ -28,13 +34,13 @@ volatile sig_atomic_t keepRunning = 1;
  * @param egressInt New egress interface.
  * @param eniId ENI ID of the new endpoint.
  */
-void newInterfaceCallback(std::string ingressInt, const std::string egressInt, eniid_t eniId)
+void newInterfaceCallback(std::string ingressInt, const std::string egressInt, gwlbeid_t eniId)
 {
-    LOG(LS_CORE, LL_IMPORTANT, "New interface "s + ingressInt + " and "s + egressInt + " for ENI ID "s  + MakeENIStr(eniId) +  " created."s);
+    LOG(LS_CORE, LL_IMPORTANT, "New interface "s + ingressInt + " and "s + egressInt + " for GWLB endpoint vpce-"s  + MakeGwlbeStr(eniId) +  " created."s);
     if(newCmd.length() > 0)
     {
         std::stringstream ss;
-        ss << newCmd << " CREATE " << ingressInt << " " << egressInt << " " << MakeENIStr(eniId);
+        ss << newCmd << " CREATE " << ingressInt << " " << egressInt << " " << MakeGwlbeStr(eniId);
         system(ss.str().c_str());
     }
 }
@@ -45,13 +51,13 @@ void newInterfaceCallback(std::string ingressInt, const std::string egressInt, e
  * @param egressInt Old egress interface.
  * @param eniId Old ENI ID.
  */
-void deleteInterfaceCallback(std::string ingressInt, const std::string egressInt, eniid_t eniId)
+void deleteInterfaceCallback(std::string ingressInt, const std::string egressInt, gwlbeid_t eniId)
 {
-    LOG(LS_CORE, LL_IMPORTANT, "Removing interface "s + ingressInt + " and "s + egressInt + " for ENI ID "s + MakeENIStr(eniId) + "."s);
+    LOG(LS_CORE, LL_IMPORTANT, "Removing interface "s + ingressInt + " and "s + egressInt + " for GWLB endpoint vpce-"s + MakeGwlbeStr(eniId) + "."s);
     if(delCmd.length() > 0)
     {
         std::stringstream ss;
-        ss << delCmd << " DESTROY " << ingressInt << " " << egressInt << " " << MakeENIStr(eniId);
+        ss << delCmd << " DESTROY " << ingressInt << " " << egressInt << " " << MakeGwlbeStr(eniId);
         system(ss.str().c_str());
     }
 }
@@ -63,9 +69,9 @@ void deleteInterfaceCallback(std::string ingressInt, const std::string egressInt
  * @param details true to return packet counters, false to just return the status code.
  * @param gh The GeneveHandler to return the status for.
  * @param s The socket to send the health check to
- * @param json Whether to output as human text (false) or json (true)
+ * @param asJson Whether to output as human text (false) or json (true)
  */
-void performHealthCheck(bool details, GeneveHandler *gh, int s, bool json)
+void performHealthCheck(bool details, GeneveHandler *gh, int s, bool asJson)
 {
     GeneveHandlerHealthCheck ghhc = gh->check();
 
@@ -74,10 +80,10 @@ void performHealthCheck(bool details, GeneveHandler *gh, int s, bool json)
     responseStream << "HTTP/1.1 " << (gh->healthy ? "200 OK" : "503 Service Unavailable") << "\r\n"
                    << "Cache-Control: max-age=0, no-cache\r\n"
                    << "Connection: close\r\n"
-                   << "Content-Type: " << (json ? "application/json" : "text/html") << "\r\n";
+                   << "Content-Type: " << (asJson ? "application/json" : "text/html") << "\r\n";
 
     if (details) {
-        std::string body = json ? ghhc.output_json().dump() :
+        std::string body = asJson ? ghhc.output_json().dump() :
             "<!DOCTYPE html>\n<html lang=\"en-us\">\n<head><title>Health check</title></head><body>" + ghhc.output_str() + "\n</body></html>";
 
         responseStream << "Content-Length: " << body.length() << "\r\n\r\n" << body;
@@ -90,7 +96,7 @@ void performHealthCheck(bool details, GeneveHandler *gh, int s, bool json)
     // Send all data
     size_t total_sent = 0;
     while(total_sent < response.length()) {
-        ssize_t sent = send(s, response.c_str() + total_sent, response.length() - total_sent, 0);
+        ssize_t sent = send(s, response.c_str() + total_sent, response.length() - total_sent, MSG_NOSIGNAL);
         if(sent < 0) {
             if(errno == EINTR) continue;
             LOG(LS_HEALTHCHECK, LL_IMPORTANT, "Send failed: " + std::string(strerror(errno)));
@@ -140,7 +146,7 @@ void printHelp(char *progname)
             "  -t TIME    Minimum time in seconds between last packet seen and to consider the tunnel timed out. Set to 0 (the default) to never time out tunnels.\n"
             "             Note the actual time between last packet and the destroy call may be longer than this time.\n"
 #ifndef NO_RETURN_TRAFFIC
-            "  -i TIME    Idle timeout to use for the flow caches. Set this to match what GWLB is configured for. Defaults to 350 seconds.\n"
+            "  -i TIME    Idle timeout for the TCP flow cache. Set this to match what GWLB is configured for. Defaults to 350 seconds. UDP and Other flow caches use a fixed 120 second idle timeout.\n"
 #endif
             "  -p PORT    Listen to TCP port PORT and provide a health status report on it.\n"
             "  -j         For health check detailed statistics, output as JSON instead of text.\n"
@@ -154,6 +160,17 @@ void printHelp(char *progname)
             "  --tunthreads NUM         Generate NUM threads for each tunnel processor.\n"
             "  --tunaffinity AFFIN      Generate threads for each tunnel processor, pinned to the cores listed. Takes precedence over tunthreads.\n"
 #endif
+            "\n"
+            "Performance options:\n"
+            "  --rcvbuf SIZE            Socket receive buffer size in megabytes. Default is 128MB.\n"
+            "                           For 50+ Gbps throughput, use 128-256MB. Requires net.core.rmem_max sysctl >= SIZE*1024*1024.\n"
+            "  --busypoll USEC          Busy-poll the NIC up to USEC microseconds per receive (lower latency, higher CPU).\n"
+            "                           Default 0 (disabled). Try 50 for latency-sensitive high packet rates.\n"
+            "  --reserve RESV           Pre-size the flow caches to avoid rehash stalls under high flow counts.\n"
+            "                           RESV is six comma-separated entry counts in order v4TCP,v4UDP,v4Other,v6TCP,v6UDP,v6Other\n"
+            "                           (0 = don't pre-size that cache). Default 16384,16384,1024,1024,1024,1024.\n"
+            "                           Prefix with 'vpce-<id>:' to override a specific GWLB endpoint; repeat for several.\n"
+            "                           e.g. --reserve 5000000,50000,50000,20,20,20 --reserve vpce-0abc...:2000000,2000000,1024,1024,1024,1024\n"
             "\n"
             "AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.\n"
             "It is recommended to have the same number of UDP threads as tunnel processor threads, in one-arm operation.\n"
@@ -189,7 +206,43 @@ void printHelp(char *progname)
  */
 void shutdownHandler(int)
 {
-    keepRunning = 0;
+    keepRunning = false;
+}
+
+// Parse one --reserve value: "n,n,n,n,n,n" (global default) or
+// "vpce-<hex>:n,n,n,n,n,n" (per-endpoint override). Order is
+// [v4TCP,v4UDP,v4Other,v6TCP,v6UDP,v6Other]. Returns false on malformed input.
+static bool parseReserve(const std::string& arg, bool& isGlobal, gwlbeid_t& key, std::array<std::size_t,6>& out)
+{
+    std::string nums = arg;
+    isGlobal = true; key = 0;
+    auto colon = arg.find(':');
+    if(colon != std::string::npos)
+    {
+        std::string k = arg.substr(0, colon);
+        nums = arg.substr(colon + 1);
+        if(k.rfind("vpce-", 0) == 0) k = k.substr(5);
+        else if(k.rfind("eni-", 0) == 0) k = k.substr(4);
+        if(k.empty()) return false;
+        try { key = std::stoull(k, nullptr, 16); } catch(...) { return false; }
+        isGlobal = false;
+    }
+    std::array<std::size_t,6> vals{};
+    std::size_t idx = 0, start = 0;
+    for(std::size_t i = 0; i <= nums.size(); i++)
+    {
+        if(i == nums.size() || nums[i] == ',')
+        {
+            if(idx >= 6) return false;
+            std::string tok = nums.substr(start, i - start);
+            if(tok.empty()) return false;
+            try { vals[idx] = std::stoull(tok); } catch(...) { return false; }
+            idx++; start = i + 1;
+        }
+    }
+    if(idx != 6) return false;
+    out = vals;
+    return true;
 }
 
 class Logger *logger;
@@ -197,15 +250,28 @@ class Logger *logger;
 int main(int argc, char *argv[])
 {
     int c;
-    int healthCheck = 0, healthSocket;
-    int tunnelTimeout = 0, cacheTimeout = 350;
+    int healthCheck = 0, healthSocket = -1;
+    int tunnelTimeout = 0, tcpCacheTimeout = 350;
+    const int udpCacheTimeout = 120, otherCacheTimeout = 120;  // UDP / Other flow-cache idle timeouts (fixed; not CLI-configurable)
     int udpthreads = numCores();
+    int rcvBufSizeMB = 128;  // Socket receive buffer size in MB (default 128MB for 50+ Gbps)
+    int busyPollUsec = 0;    // SO_BUSY_POLL microseconds per receive (0 = disabled)
+    std::array<std::size_t,6> defaultReserve{16384, 16384, 1024, 1024, 1024, 1024};  // flow-cache pre-size (entries) per cache
+    std::unordered_map<gwlbeid_t, std::array<std::size_t,6>> perEndpointReserve;      // optional per-vpce overrides
 #ifndef NO_RETURN_TRAFFIC
     int tunthreads = numCores();
 #endif
     std::string udpaffinity, tunaffinity, logoptions;
     bool detailedHealth = true, printHelpFlag = false, jsonHealth = false;
 
+    // Long options without a short-option equivalent are identified by a unique
+    // value (>= 256, so they can't collide with an ASCII short option) and
+    // switched on directly below. This avoids fragile array-index tracking that
+    // silently misroutes options when the list is edited or between build variants.
+    enum {
+        OPT_UDPTHREADS = 256, OPT_UDPAFFINITY, OPT_LOGGING,
+        OPT_TUNTHREADS, OPT_TUNAFFINITY, OPT_RCVBUF, OPT_BUSYPOLL, OPT_RESERVE
+    };
     static struct option long_options[] = {
             {"cmdnew", required_argument, NULL, 'c'},
             {"cmddel", required_argument, NULL, 'r'},
@@ -214,46 +280,48 @@ int main(int argc, char *argv[])
             {"debug", no_argument, NULL, 'd'},
             {"help", no_argument, NULL, 'h'},
             {"help", no_argument, NULL, '?'},
-            {"udpthreads", required_argument, NULL, 0},    // optind 7
-            {"udpaffinity", required_argument, NULL, 0},   // optind 8
-            {"logging", required_argument, NULL, 0},       // optind 9
-            {"json", no_argument, NULL, 'j'},              // optind 10
-            {"idle", required_argument, NULL, 'i'},        // optind 11
+            {"udpthreads", required_argument, NULL, OPT_UDPTHREADS},
+            {"udpaffinity", required_argument, NULL, OPT_UDPAFFINITY},
+            {"logging", required_argument, NULL, OPT_LOGGING},
+            {"json", no_argument, NULL, 'j'},
+            {"idle", required_argument, NULL, 'i'},
 #ifndef NO_RETURN_TRAFFIC
-            {"tunthreads", required_argument, NULL, 0},    // optind 12
-            {"tunaffinity", required_argument, NULL, 0},   // optind 13
+            {"tunthreads", required_argument, NULL, OPT_TUNTHREADS},
+            {"tunaffinity", required_argument, NULL, OPT_TUNAFFINITY},
 #endif
+            {"rcvbuf", required_argument, NULL, OPT_RCVBUF},
+            {"busypoll", required_argument, NULL, OPT_BUSYPOLL},
+            {"reserve", required_argument, NULL, OPT_RESERVE},
             {0, 0, 0, 0}
     };
 
     // Argument parsing
-    int optind;
-    while ((c = getopt_long (argc, argv, "h?djxc:r:t:p:si:", long_options, &optind)) != -1)
+    while ((c = getopt_long (argc, argv, "h?djxc:r:t:p:si:", long_options, NULL)) != -1)
     {
         switch(c)
         {
-            case 0:
-                // Long option
-                switch(optind) {
-                    case 7:
-                        udpthreads = atoi(optarg);
-                        break;
-                    case 8:
-                        udpaffinity = std::string(optarg);
-                        break;
-                    case 9:
-                        logoptions = std::string(optarg);
-                        break;
+            case OPT_UDPTHREADS:  udpthreads = atoi(optarg); break;
+            case OPT_UDPAFFINITY: udpaffinity = std::string(optarg); break;
+            case OPT_LOGGING:     logoptions = std::string(optarg); break;
 #ifndef NO_RETURN_TRAFFIC
-                    case 12:
-                        tunthreads = atoi(optarg);
-                        break;
-                    case 13:
-                        tunaffinity = std::string(optarg);
-                        break;
+            case OPT_TUNTHREADS:  tunthreads = atoi(optarg); break;
+            case OPT_TUNAFFINITY: tunaffinity = std::string(optarg); break;
 #endif
+            case OPT_RCVBUF:      rcvBufSizeMB = atoi(optarg); break;
+            case OPT_BUSYPOLL:    busyPollUsec = atoi(optarg); break;
+            case OPT_RESERVE:
+            {
+                bool isGlobal; gwlbeid_t key; std::array<std::size_t,6> vals;
+                if(!parseReserve(optarg, isGlobal, key, vals)) {
+                    fprintf(stderr, "Invalid --reserve '%s'. Expected six comma-separated counts "
+                            "(v4TCP,v4UDP,v4Other,v6TCP,v6UDP,v6Other), optionally prefixed with "
+                            "'vpce-<id>:' for a per-endpoint override.\n", optarg);
+                    exit(EXIT_FAILURE);
                 }
+                if(isGlobal) defaultReserve = vals;
+                else perEndpointReserve[key] = vals;
                 break;
+            }
             case 'c':
                 newCmd = std::string(optarg);
                 break;
@@ -276,7 +344,7 @@ int main(int argc, char *argv[])
                 jsonHealth = true;
                 break;
             case 'i':
-                cacheTimeout = atoi(optarg);
+                tcpCacheTimeout = atoi(optarg);
                 break;
             case '?':
             case 'h':
@@ -298,10 +366,18 @@ int main(int argc, char *argv[])
     // GWLB only supports IPv4.
     if(healthCheck > 0)
     {
-        if((healthSocket = socket(AF_INET6, SOCK_STREAM, 0)) == 0)
+        if((healthSocket = socket(AF_INET6, SOCK_STREAM, 0)) < 0)
         {
             LOG(LS_CORE, LL_CRITICAL, "Creating health check socket failed: "s + std::strerror(errno));
             exit(EXIT_FAILURE);
+        }
+
+        // Disable IPV6_V6ONLY to allow IPv4 connections on the IPv6 socket (dual-stack)
+        // This is required on RHEL 10+ where IPV6_V6ONLY defaults to 1
+        int v6only = 0;
+        if(setsockopt(healthSocket, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) < 0)
+        {
+            LOG(LS_CORE, LL_IMPORTANT, "Warning: Could not disable IPV6_V6ONLY, IPv4 health checks may not work: "s + std::strerror(errno));
         }
 
         struct sockaddr_in6 addr;
@@ -315,7 +391,12 @@ int main(int argc, char *argv[])
             LOG(LS_CORE, LL_CRITICAL, "Unable to listen to health status port: "s + std::strerror(errno));
             exit(EXIT_FAILURE);
         }
-        listen(healthSocket, 3);
+        if(listen(healthSocket, 3) < 0)
+        {
+            LOG(LS_CORE, LL_CRITICAL, "Unable to listen on health status port: "s + std::strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+        LOG(LS_CORE, LL_IMPORTANT, "Health check listening on port %d (IPv4 and IPv6)", healthCheck);
     }
 
     signal(SIGINT, shutdownHandler);
@@ -333,15 +414,35 @@ int main(int argc, char *argv[])
     tun.cfg.resize(0);
 #endif
 
-    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, tunnelTimeout, cacheTimeout, udp, tun);
+    initCoarseClock();
+    const GwlbtunConfig cfg{ tunnelTimeout, tcpCacheTimeout, udpCacheTimeout, otherCacheTimeout, udp, tun, rcvBufSizeMB, busyPollUsec, defaultReserve, std::move(perEndpointReserve) };
+    auto gh = new GeneveHandler(&newInterfaceCallback, &deleteInterfaceCallback, cfg);
     struct timespec timeout;
     timeout.tv_sec = 1; timeout.tv_nsec = 0;
     fd_set fds;
     int ready;
-    int ticksSinceCheck = 60;
     LOG(LS_CORE, LL_IMPORTANT, "AWS Gateway Load Balancer Tunnel Handler v%d.%d (%s) built %s", VERSION_MAJOR, VERSION_MINOR, GIT_DESCRIBE, BUILD_TIMESTAMP);
+
+    LOG(LS_CORE, LL_IMPORTANT, "Flow-cache reserve (default, entries): v4[tcp=%zu udp=%zu other=%zu] v6[tcp=%zu udp=%zu other=%zu]",
+        cfg.defaultReserve[0], cfg.defaultReserve[1], cfg.defaultReserve[2], cfg.defaultReserve[3], cfg.defaultReserve[4], cfg.defaultReserve[5]);
+    for(const auto& kv : cfg.perEndpointReserve)
+        LOG(LS_CORE, LL_IMPORTANT, "Flow-cache reserve (vpce-%s): v4[tcp=%zu udp=%zu other=%zu] v6[tcp=%zu udp=%zu other=%zu]",
+            MakeGwlbeStr(kv.first).c_str(), kv.second[0], kv.second[1], kv.second[2], kv.second[3], kv.second[4], kv.second[5]);
+
+    // Flow-cache expiry + idle-ENI reap run on a dedicated reaper thread so the
+    // O(N) scan never stalls the main loop's health accept. Wakes every second
+    // and sweeps every ~60s; exits within a second of shutdown.
+    std::thread reaper([gh]() {
+        int t = 0;
+        while(keepRunning) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if(++t >= 60) { t = 0; gh->sweep(); }
+        }
+    });
+
     while(keepRunning)
     {
+        updateCoarseClock();
         FD_ZERO(&fds);
         if(healthCheck > 0)
         {
@@ -356,28 +457,25 @@ int main(int argc, char *argv[])
             struct sockaddr_in6 from;
             socklen_t fromlen = sizeof(from);
             hsClient = accept(healthSocket, (struct sockaddr *)&from, &fromlen);
-            LOG(LS_HEALTHCHECK, LL_DEBUG, "Processing a health check client for " + sockaddrToName((struct sockaddr *)&from));
-            try {
-                performHealthCheck(detailedHealth, gh, hsClient, jsonHealth);
-                close(hsClient);
-            } catch(...) {
-                close(hsClient);
-                throw;
+            if(hsClient < 0)
+            {
+                LOG(LS_HEALTHCHECK, LL_IMPORTANT, "Unable to accept health check client: "s + std::strerror(errno));
+            } else {
+                LOG(LS_HEALTHCHECK, LL_DEBUG, "Processing a health check client for " + sockaddrToName((struct sockaddr *)&from));
+                try {
+                    performHealthCheck(detailedHealth, gh, hsClient, jsonHealth);
+                    close(hsClient);
+                } catch(...) {
+                    close(hsClient);
+                    throw;
+                }
             }
-            ticksSinceCheck = 60;
-        }
-
-        ticksSinceCheck --;
-        if(ticksSinceCheck < 0)
-        {
-            GeneveHandlerHealthCheck ghhc = gh->check();
-            LOG(LS_HEALTHCHECK, LL_DEBUG, ghhc.output_str());
-            ticksSinceCheck = 60;
         }
     }
 
     // The loop was interrupted (most likely by Ctrl-C or likewise).  Clean up a few things.
     LOG(LS_CORE, LL_IMPORTANT, "Shutting down.");
+    if(reaper.joinable()) reaper.join();
     delete(gh);
     if(healthCheck > 0) close(healthSocket);
     LOG(LS_CORE, LL_IMPORTANT, "Shutdown complete.");

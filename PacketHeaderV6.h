@@ -1,8 +1,5 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
-//
-// Quick class to generate hashes of IPv6 packets for use in std::unordered_map
-//
 
 #ifndef GWLBTUN_PACKETHEADERV6_H
 #define GWLBTUN_PACKETHEADERV6_H
@@ -19,14 +16,11 @@ public:
     
     bool operator==(const PacketHeaderV6 &ph) const
     {
-    #ifdef HASH_IS_SYMMETRICAL
+        // Bidirectional: a flow and its reverse compare equal (depends on the
+        // symmetric hash invariant in utils.h).
         return prot == ph.prot &&
             ((srcpt == ph.srcpt && dstpt == ph.dstpt && !memcmp(&src, &ph.src, sizeof(struct in6_addr)) && !memcmp(&dst, &ph.dst, sizeof(struct in6_addr))) ||
-                (srcpt == ph.dstpt && dstpt == ph.srcpt && !memcmp(&src, &ph.dst, sizeof(struct in6_addr)) && !memcmp(&dst, &ph.src, sizeof(struct in6_addr))));
-    #else
-        return prot == ph.prot &&  srcpt == ph.srcpt && dstpt == ph.dstpt &&
-            !memcmp(&src, &ph.src, sizeof(struct in6_addr)) && !memcmp(&dst, &ph.dst, sizeof(struct in6_addr));
-    #endif
+             (srcpt == ph.dstpt && dstpt == ph.srcpt && !memcmp(&src, &ph.dst, sizeof(struct in6_addr)) && !memcmp(&dst, &ph.src, sizeof(struct in6_addr))));
     }
 
     /**
@@ -41,13 +35,15 @@ public:
 
     std::string text() const;
 
+public:
+    uint8_t   prot;    // Inner IP protocol number — public so flow-cache routing can switch on it.
+
 private:
     struct in6_addr src;
     struct in6_addr dst;
     uint32_t  flow;
     uint16_t  srcpt;
     uint16_t  dstpt;
-    uint8_t   prot;
 };
 
 std::ostream &operator<<(std::ostream &os, PacketHeaderV6 const &m);
