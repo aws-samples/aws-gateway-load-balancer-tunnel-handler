@@ -7,7 +7,7 @@
 
 (Note: v3.2 is in integration on dev-oct2026-prs; the above reflects the planned wave and is reconciled with the merged set at release.)
 
-## Current Development Branch (v3.1):
+## Public Development v3.1:
 - Performance improvements to /dev/net/tun handling, packet manipulation, and memory usage. The improvements help more on higher CPU core counts - at 4 cores, the improvements result in approximately 4.3% improvement as measured by packets per second, but at 32 cores it's 37.2% more.
 - Clean up /dev/net/tun fd handling to reduce file descriptor count
 - Improved flow cookie tracker hashing algorithm to reduce collisions in high cps, low entropy scenarios.
