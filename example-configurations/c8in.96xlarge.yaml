@@ -1,0 +1,47 @@
+# gwlbtun configuration for a large appliance: c8in.96xlarge (384 vCPUs, 32 network queues on NUMA node 0),
+# one ENI. This is the layout that was lossless to about 8M pps (64-byte and 1024-byte packets) at ~0.8 ms
+# in our tests; see README-Large-Instances.md for how it was found and how to adapt it to other instance types.
+# Run with:   gwlbtun -f /etc/gwlbtun/c8in.96xlarge.yaml
+# Keys are gwlbtun's long option names (see gwlbtun -h); options on the command line override this file.
+# Check what a file and command line add up to with:   gwlbtun -f <file> --show-config
+#
+# This file assumes the operating system has been prepared as the guide describes, before gwlbtun starts:
+#   - the network interface's receive ring set (we used 4096: ethtool -G <if> rx 4096) BEFORE the
+#     interrupts are pinned: changing the ring frees and re-requests the interrupts (verified in the ENA
+#     driver source), which in our tests lost their affinity;
+#   - irqbalance kept off the queue interrupts (we stopped and disabled it; the ENA best practices
+#     prefer keeping it running with exclusions, see the guide);
+#   - network queue q's interrupt pinned to CPU q (CPUs 0-31, the interface's NUMA node). With 64 queues
+#     (set while the instance is stopped; the best of 32, 64 and 128 in our tests), queues 32-63 go on
+#     those CPUs' hyperthread siblings, 192-223;
+#   - net.core.rmem_max >= 268435456.
+# The CPU lists below keep gwlbtun off CPUs 0-31 and their hyperthread siblings 192-223, so they suit both.
+
+# Hook scripts, run when an endpoint's gwi-/gwo- interfaces are created and before they're destroyed.
+cmdnew: /opt/gwlbtun/create-route.sh
+cmddel: /opt/gwlbtun/create-route.sh
+
+# Receive GENEVE only on the data interface (the name varies by instance type; check `ip -br link`).
+interface: [ens5]
+
+# Health check for the GWLB target group, on the data interface only.
+port: "ens5:80"
+json: true
+
+timeout: 300
+idle: 350
+
+# 128 UDP receiver threads (four per network queue) on NUMA nodes 1-2, and 128 tunnel threads per tun
+# interface on nodes 3-4. Each thread gets its own CPU; none shares a CPU with a network queue.
+udpaffinity: 32-95,224-287
+tunaffinity: 96-159,288-351
+
+# This layout was lossless to about 8M pps (64- and 1024-byte packets). Alternative with a quarter of the
+# UDP threads: gwlbtun's default UDP layout (one thread per network queue, on its queue CPU's hyperthread
+# sibling; Linux 6.2 or later), keeping the tunaffinity line. It was lossless to about 6-7M pps, but
+# collapsed to about 4-4.5M pps when overloaded.
+# udpaffinity: nearest
+
+rcvbuf: 128
+# Send buffer per tunnel thread's socket back to GWLB, in MB (the default).
+sndbuf: 16

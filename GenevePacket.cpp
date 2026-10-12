@@ -4,19 +4,16 @@
 /**
  * GenevePacket class takes in a raw packet buffer and attempts to interpret it as a Geneve-encapsulated packet.
  * The status member variable will be GP_STATUS_OK if this is successful and everything passes sanity checks,
- * otherwise will be one of the other codes defined in GeneveHeader.h.
+ * otherwise will be one of the other codes defined in GenevePacket.h.
  *
  * This code is based on the version of Geneve as defined in RFC 8926.
  */
 
 #include "GenevePacket.h"
-#include <cstring>
+#include <netinet/if_ether.h>
 #include "utils.h"
 
-/**
- * Empty initializer
- */
-GenevePacket::GenevePacket() : status(GP_STATUS_EMPTY) { }
+using namespace std::string_literals;
 
 /**
  * Interpret the packet as a GENEVE packet. Does sanity checks to ensure the packet is correct. Callers should
@@ -26,16 +23,14 @@ GenevePacket::GenevePacket() : status(GP_STATUS_EMPTY) { }
  * @param pktBuf Pointer to the UDP packet payload received.
  * @param pktLen Length of pktBuf
  */
-GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
-        : status(GP_STATUS_EMPTY), gwlbeEndpointIdValid(false), attachmentIdValid(false), flowCookieValid(false)
+GenevePacket::GenevePacket(const unsigned char *pktBuf, ssize_t pktLen)
 {
-    // Fast path checks with branch prediction hints
     if(__builtin_expect(pktLen < 8, 0))
     {
         status = GP_STATUS_TOO_SHORT;
         return;
     }
-    
+
     // Version check (bits 0-1 must be 0)
     if(__builtin_expect((pktBuf[0] & 0xc0) != 0, 0))
     {
@@ -43,42 +38,33 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
         return;
     }
 
-    // Ethertype check - load as uint16_t directly
-    uint16_t ethertype = be16toh_unaligned(&pktBuf[2]);
+    const uint16_t ethertype = be16toh_unaligned(&pktBuf[2]);
     if(__builtin_expect(ethertype != ETH_P_IP && ethertype != ETH_P_IPV6, 0))
     {
         status = GP_STATUS_BAD_ETHERTYPE;
         return;
     }
-    
-    // Extract VNI (24 bits at offset 4) - avoid memcpy
-    geneveVni = (pktBuf[4] << 16) | (pktBuf[5] << 8) | pktBuf[6];
 
     // Geneve options processing. The options length is expressed in 4-byte multiples (RFC 8926 section 3.4).
-    int optLen = (pktBuf[0] & 0x3f) * 4;
-    if(__builtin_expect(optLen > pktLen - 8, 0))
+    const size_t optLen = (size_t)(pktBuf[0] & 0x3f) * 4;
+    if(__builtin_expect(optLen > (size_t)pktLen - 8, 0))
     {
         status = GP_STATUS_BAD_OPTLEN;
         return;
     }
 
-    // Work through the packet buffer, option-by-option
-    unsigned char *pktPtr = &pktBuf[8];
-    unsigned char *pktEnd = &pktBuf[8 + optLen];
-    
-    while(pktPtr < pktEnd)
+    // Work through the options one by one, by offset (never forming a pointer past the buffer). Each needs a
+    // 4-byte option header, and its declared data length must fit in what's left of the option region, or a
+    // malformed packet could read past it. See RFC 8926 section 3.5.
+    const size_t end = 8 + optLen;
+    for(size_t off = 8; end - off >= 4; )
     {
-        // Need at least 4 bytes left for the option header itself. See RFC 8926 section 3.5.
-        if(pktPtr + 4 > pktEnd)
+        const uint16_t optClass = be16toh_unaligned(&pktBuf[off]);
+        const uint8_t optType = pktBuf[off + 2];
+        const size_t optDataLen = (size_t)(pktBuf[off + 3] & 0x1f) * 4;
+        if(end - off - 4 < optDataLen)
             break;
-        uint16_t optClass = be16toh_unaligned(&pktPtr[0]);
-        uint8_t optType = pktPtr[2];
-        uint8_t optDataLen = (pktPtr[3] & 0x1f) * 4;
-        // The option's declared data length must also fit within the remaining option region,
-        // otherwise a malformed/truncated packet could read past it into stale buffer bytes.
-        if(pktPtr + 4 + optDataLen > pktEnd)
-            break;
-        unsigned char *optData = &pktPtr[4];
+        const unsigned char *optData = &pktBuf[off + 4];
 
         // Check for AWS specific options for GWLB (class 0x108)
         if(__builtin_expect(optClass == 0x108, 1))
@@ -102,34 +88,26 @@ GenevePacket::GenevePacket(unsigned char *pktBuf, ssize_t pktLen)
                 flowCookie = be32toh_unaligned(optData);
             }
         }
-        pktPtr += 4 + optDataLen;
+        off += 4 + optDataLen;
     }
 
-    headerLen = 8 + optLen;
+    headerLen = (uint32_t)end;
 
-    // If the three mandatory options for GWLB weren't seen, this can't be a valid packet from it.
+    // gwlbtun requires all three GWLB options (endpoint ID, attachment ID, flow cookie), which GWLB sent on every
+    // packet in our tests; without them the packet is rejected.
     if(__builtin_expect(!gwlbeEndpointIdValid || !attachmentIdValid || !flowCookieValid, 0))
         status = GP_STATUS_MISSING_GWLB_OPTIONS;
     else
         status = GP_STATUS_OK;
 }
 
-std::string GenevePacket::text()
-{
-    std::ostringstream ss;
-    ss << " Status: " << (status) << std::hex << " GWLBe endpoint: vpce-" << (MakeGwlbeStr(gwlbeEndpointIdValid?gwlbeEndpointId:0)) << " Attachment ID: " << (attachmentIdValid?attachmentId:0) << " Flow Cookie: " << (flowCookieValid?flowCookie:0) << std::dec;
-    return ss.str();
-}
-
 /**
- * Output a human-readable string of the contents of this GenevePacket.
- *
- * @param os Output stream to write to.
- * @param m The GenevePacket to write.
- * @return The same output stream, with the text added.
+ * The GWLB options, for logs: " GWLBe endpoint: vpce-<id> Attachment ID: 0x<id> Flow Cookie: 0x<cookie>", with
+ * " (status N)" added when the header didn't parse cleanly. Options that weren't found show as 0.
  */
-auto operator<<(std::ostream& os, GenevePacket const& m) -> std::ostream&
+std::string GenevePacket::text() const
 {
-    return os << " Status: " << (m.status) << std::hex << " GWLBe endpoint: vpce-" << (MakeGwlbeStr(m.gwlbeEndpointIdValid?m.gwlbeEndpointId:0)) << " Attachment ID: " << (m.attachmentIdValid?m.attachmentId:0) << " Flow Cookie: " << (m.flowCookieValid?m.flowCookie:0) << std::dec;
+    return stringFormat(" GWLBe endpoint: vpce-%s Attachment ID: 0x%" PRIx64 " Flow Cookie: 0x%08" PRIx32 "%s",
+                        MakeGwlbeStr(gwlbeEndpointIdValid ? gwlbeEndpointId : 0).c_str(), attachmentIdValid ? attachmentId : 0,
+                        flowCookieValid ? flowCookie : 0, status == GP_STATUS_OK ? "" : (" (status "s + std::to_string(status) + ")"s).c_str());
 }
-

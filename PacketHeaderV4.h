@@ -5,43 +5,27 @@
 #define GWLBTUN_PACKETHEADERV4_H
 
 #include <cinttypes>
-#include <iostream>
 #include <stdexcept>
-#include <netinet/ip6.h>
-#include <typeindex>
+#include <string>
+#include <sys/types.h>
 #include "utils.h"
 
 class PacketHeaderV4 {
 public:
-    PacketHeaderV4(unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));   // pktbuf points to the start of the IP header.
+    // pktbuf points to the start of the IP header. Throws std::invalid_argument for a malformed header.
+    PacketHeaderV4(const unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));
     std::string text() const;
 
-    /**
-    * Compare if the headers in one packet match another. Meant to be used for the various sort and search functions.
-    *
-    * @param ph PacketHeaderV4 to compare againgst.
-    * @return true if PacketHeaders are the same, false otherwise.
-    */
+    // Bidirectional: a flow and its reverse compare equal (depends on the symmetric hash invariant in utils.h).
     bool operator==(const PacketHeaderV4 &ph) const
     {
-        // Bidirectional: a flow and its reverse compare equal (depends on the
-        // symmetric hash invariant in utils.h).
         return prot == ph.prot && ((src == ph.src && dst == ph.dst && srcpt == ph.srcpt && dstpt == ph.dstpt) ||
                                    (src == ph.dst && dst == ph.src && srcpt == ph.dstpt && dstpt == ph.srcpt));
     }
 
-    /**
-    * Returns a hash value based on the protocol data.
-    *
-    * @return Hash value.
-    */
-    std::size_t hash() const
-    {
-        return hashFunc(prot, (void *)&src, (void *)&dst, 4, srcpt, dstpt);
-    }
+    std::size_t hash() const { return hashFlow(prot, src, dst, srcpt, dstpt); }
 
-public:
-    uint8_t   prot;    // Inner IP protocol number — public so flow-cache routing can switch on it.
+    uint8_t   prot;    // Inner IP protocol number (picks the flow cache)
 
 private:
     uint32_t  src;
@@ -50,21 +34,7 @@ private:
     uint16_t  dstpt;
 };
 
-std::ostream &operator<<(std::ostream &os, PacketHeaderV4 const &m);
-
-template<> struct std::hash<PacketHeaderV4> {
-    std::size_t operator()(const PacketHeaderV4& t) const
-    {
-        return t.hash();
-    };
-};
-
-/**
- * Extend std::hash for PacketHeaderV4
- */
-inline std::size_t hash_value(const PacketHeaderV4& t)
-{
-    return t.hash();
-}
+// Hash for boost::hash (used by the flow cache's boost::concurrent_flat_map).
+inline std::size_t hash_value(const PacketHeaderV4& t) { return t.hash(); }
 
 #endif //GWLBTUN_PACKETHEADERV4_H

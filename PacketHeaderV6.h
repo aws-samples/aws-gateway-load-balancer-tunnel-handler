@@ -5,58 +5,40 @@
 #define GWLBTUN_PACKETHEADERV6_H
 
 #include <cinttypes>
-#include <iostream>
+#include <cstring>
 #include <stdexcept>
-#include <netinet/ip6.h>
+#include <string>
+#include <sys/types.h>
+#include <netinet/in.h>
 #include "utils.h"
 
 class PacketHeaderV6 {
 public:
-    PacketHeaderV6(unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));   // pktbuf points to the start of the IP header.
-    
+    // pktbuf points to the start of the IP header. Throws std::invalid_argument for a malformed header.
+    PacketHeaderV6(const unsigned char *pktbuf, ssize_t pktlen) __attribute__((hot));
+    std::string text() const;
+
+    // Bidirectional: a flow and its reverse compare equal (depends on the symmetric hash invariant in utils.h).
     bool operator==(const PacketHeaderV6 &ph) const
     {
-        // Bidirectional: a flow and its reverse compare equal (depends on the
-        // symmetric hash invariant in utils.h).
         return prot == ph.prot &&
             ((srcpt == ph.srcpt && dstpt == ph.dstpt && !memcmp(&src, &ph.src, sizeof(struct in6_addr)) && !memcmp(&dst, &ph.dst, sizeof(struct in6_addr))) ||
              (srcpt == ph.dstpt && dstpt == ph.srcpt && !memcmp(&src, &ph.dst, sizeof(struct in6_addr)) && !memcmp(&dst, &ph.src, sizeof(struct in6_addr))));
     }
 
-    /**
-    * Returns a hash value based on the protocol data.
-    *
-    * @return Hash value.
-    */
-    std::size_t hash() const
-    {
-        return hashFunc(prot, (void *)&src, (void *)&dst, 16, srcpt, dstpt);
-    }
+    std::size_t hash() const { return hashFlow(prot, src, dst, srcpt, dstpt); }
 
-    std::string text() const;
-
-public:
-    uint8_t   prot;    // Inner IP protocol number — public so flow-cache routing can switch on it.
+    uint8_t   prot;    // Inner IP protocol number (after any extension headers; picks the flow cache)
 
 private:
     struct in6_addr src;
     struct in6_addr dst;
-    uint32_t  flow;
+    uint32_t  flow;    // Flow label: shown in text() only, not part of the flow's identity
     uint16_t  srcpt;
     uint16_t  dstpt;
 };
 
-std::ostream &operator<<(std::ostream &os, PacketHeaderV6 const &m);
-
-template<> struct std::hash<PacketHeaderV6> {
-    std::size_t operator()(const PacketHeaderV6& t) const
-    {
-        return t.hash();
-    };
- };
-
-inline std::size_t hash_value(const PacketHeaderV6& t) {
-    return t.hash();
-}
+// Hash for boost::hash (used by the flow cache's boost::concurrent_flat_map).
+inline std::size_t hash_value(const PacketHeaderV6& t) { return t.hash(); }
 
 #endif //GWLBTUN_PACKETHEADERV6_H

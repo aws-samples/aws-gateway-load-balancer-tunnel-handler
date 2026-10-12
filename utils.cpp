@@ -8,6 +8,10 @@
 #include "utils.h"
 
 #include <cstring>
+#include <sched.h>
+#include <pthread.h>
+#include <cerrno>
+#include <stdexcept>
 #include <ctime>
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -16,6 +20,14 @@
 #include <string>
 #include <algorithm>
 #include <iostream>
+#include <cstdlib>
+#include <sstream>
+#include <sys/socket.h>
+#include <sys/eventfd.h>
+#include <poll.h>
+#include <system_error>
+#include <unistd.h>
+#include <cinttypes>
 #include "Logger.h"
 
 using namespace std::string_literals;
@@ -27,33 +39,36 @@ using namespace std::string_literals;
  * @param ... Parameters for the fmt_str
  * @return A std::string of the formatted output
  */
-std::string stringFormat(const std::string& fmt_str, ...) {
+std::string stringFormat(const char *fmt, ...) {
     va_list ap;
 
-    va_start(ap, &fmt_str);
-    std::string ret = stringFormat(fmt_str, ap);
+    va_start(ap, fmt);
+    std::string ret = stringFormat(fmt, ap);
     va_end(ap);
 
     return ret;
 }
 
-std::string stringFormat(const std::string& fmt_str, va_list ap)
+std::string stringFormat(const char *fmt, va_list ap)
 {
-    // Make a copy of the va_list since we need to use it multiple times
-    va_list ap_copy;
-    va_copy(ap_copy, ap);
+    // Measure with a copy of the va_list (it can only be walked once), then format straight into the string.
+    va_list measure;
+    va_copy(measure, ap);
+    const int size = vsnprintf(nullptr, 0, fmt, measure);
+    va_end(measure);
+    if(size < 0)
+        return std::string();
+    std::string s((size_t)size + 1, '\0');
+    vsnprintf(s.data(), s.size(), fmt, ap);
+    s.resize((size_t)size);
+    return s;
+}
 
-    // Calculate the size needed for the formatted string
-    int size = vsnprintf(nullptr, 0, fmt_str.c_str(), ap_copy);
-    va_end(ap_copy);
-
-    // Allocate the exact buffer size needed
-    std::unique_ptr<char[]> formatted(new char[size + 1]);
-
-    // Use the original va_list for the actual formatting
-    vsnprintf(formatted.get(), size + 1, fmt_str.c_str(), ap);
-
-    return std::string(formatted.get());
+std::string flowL4Text(uint8_t prot, uint16_t srcpt, uint16_t dstpt)
+{
+    if(prot == IPPROTO_UDP || prot == IPPROTO_TCP)
+        return stringFormat("  Prot %s, src pt %u, dst pt %u", prot == IPPROTO_UDP ? "UDP" : "TCP", srcpt, dstpt);
+    return "  Prot #"s + std::to_string(prot);
 }
 
 /**
@@ -61,76 +76,102 @@ std::string stringFormat(const std::string& fmt_str, va_list ap)
  * source port and it changing constantly.
  *
  * @param sock Existing socket(AF_INET,SOCK_RAW, IPPROTO_RAW) to use for sending
- * @param from_addr IP address to send the packet from.
- * @param from_port UDP source port to use
- * @param to_addr IP address to send the packet to.
- * @param to_port UDP destination port
- * @param payload_iov Scatter-gather array of payload buffers
- * @param payload_iovcnt Number of entries in payload_iov
+ * @param from IP address to send the packet from.
+ * @param fport UDP source port to use
+ * @param to IP address to send the packet to.
+ * @param tport UDP destination port
+ * @param hdr, hdrLen The GENEVE header
+ * @param pkt, pktLen The packet it encapsulates
+ * @param ifindex Interface to send out of (the flow's ingress interface); 0 = let routing choose.
  * @return true if packet was sent successfully, false otherwise.
  */
-bool sendUdpSG(int sock, struct in_addr from_addr, uint16_t from_port,
-               struct in_addr to_addr, uint16_t to_port,
-               const struct iovec *payload_iov, int payload_iovcnt)
+bool sendUdpSG(int sock, struct in_addr from, uint16_t fport, struct in_addr to, uint16_t tport,
+               const void *hdr, size_t hdrLen, const void *pkt, size_t pktLen, int ifindex)
 {
-    // Build headers on stack
     struct {
         struct iphdr ip;
         struct udphdr udp;
     } __attribute__((packed)) headers;
 
-    // Calculate total payload length
-    size_t total_payload = 0;
-    for(int i = 0; i < payload_iovcnt; i++) {
-        total_payload += payload_iov[i].iov_len;
-    }
+    // The IP and UDP length fields are 16 bits. A packet this large couldn't leave the instance anyway (the
+    // send would fail with EMSGSIZE), but don't let the lengths wrap.
+    const size_t payload = hdrLen + pktLen;
+    if(payload > 65535 - sizeof(headers))
+        return false;
 
     headers.ip.version = 4;
     headers.ip.ihl = 5;
     headers.ip.tos = 0;
-    headers.ip.tot_len = htons(sizeof(headers) + total_payload);
+    headers.ip.tot_len = htons((uint16_t)(sizeof(headers) + payload));
+    // Don't Fragment, which makes each packet an "atomic datagram" (RFC 6864): its ID field carries no
+    // meaning, so the kernel leaves it 0. Without DF, Linux gives every raw IP_HDRINCL packet whose ID is 0 an ID
+    // from a hash table keyed by source, destination and protocol, so all tunnel threads sending to the same
+    // GWLB address update one shared counter per packet (measured: 3-13% of all CPU on a c8in.96xlarge at
+    // 12-14M pps). These packets were never fragmented anyway: the kernel rejects raw IP_HDRINCL sends larger
+    // than the interface MTU (EMSGSIZE) rather than fragmenting them.
     headers.ip.id = 0;
-    headers.ip.frag_off = 0;
+    headers.ip.frag_off = htons(IP_DF);
     headers.ip.ttl = 2;
     headers.ip.protocol = IPPROTO_UDP;
     headers.ip.check = 0;
-    headers.ip.saddr = from_addr.s_addr;
-    headers.ip.daddr = to_addr.s_addr;
+    headers.ip.saddr = from.s_addr;
+    headers.ip.daddr = to.s_addr;
 
-    headers.udp.source = htons(from_port);
-    headers.udp.dest = htons(to_port);
-    headers.udp.len = htons(sizeof(struct udphdr) + total_payload);
+    headers.udp.source = htons(fport);
+    headers.udp.dest = htons(tport);
+    headers.udp.len = htons((uint16_t)(sizeof(struct udphdr) + payload));
     headers.udp.check = 0;   // 0 = no UDP checksum (valid for IPv4). The kernel does not compute it for raw IP_HDRINCL sockets, so an unset field would ship stack garbage.
 
-    // Build iovec array: headers + payload segments
-    struct iovec iov[payload_iovcnt + 1];
-    iov[0].iov_base = &headers;
-    iov[0].iov_len = sizeof(headers);
+    struct iovec iov[3] = { { &headers, sizeof(headers) }, { const_cast<void *>(hdr), hdrLen }, { const_cast<void *>(pkt), pktLen } };
 
-    // Copy payload iovec entries
-    for(int i = 0; i < payload_iovcnt; i++) {
-        iov[i + 1] = payload_iov[i];
-    }
-
-    struct sockaddr_in to_zero_port;
-    to_zero_port.sin_family = AF_INET;
-    to_zero_port.sin_port = 0;
-    to_zero_port.sin_addr.s_addr = to_addr.s_addr;
+    struct sockaddr_in dest{};
+    dest.sin_family = AF_INET;
+    dest.sin_addr = to;
 
     struct msghdr msg = {};
-    msg.msg_name = &to_zero_port;
-    msg.msg_namelen = sizeof(to_zero_port);
+    msg.msg_name = &dest;
+    msg.msg_namelen = sizeof(dest);
     msg.msg_iov = iov;
-    msg.msg_iovlen = payload_iovcnt + 1;
+    msg.msg_iovlen = 3;
+
+    // Send out of the interface the flow arrived on, from the address it arrived at. Without this the
+    // kernel picks the output interface by destination alone, so on an instance with several ENIs a
+    // reply could leave by a different ENI than the one whose address is in the IP header, and in our tests
+    // such replies were dropped (source/destination checking on). IP_PKTINFO sets the route lookup's output interface and source
+    // address (the latter also lets per-ENI source policy routing match).
+    union {
+        char buf[CMSG_SPACE(sizeof(struct in_pktinfo))];
+        struct cmsghdr align;
+    } control;
+    if(ifindex > 0)
+    {
+        memset(&control, 0, sizeof(control));
+        msg.msg_control = control.buf;
+        msg.msg_controllen = sizeof(control.buf);
+        struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+        cm->cmsg_level = IPPROTO_IP;
+        cm->cmsg_type = IP_PKTINFO;
+        cm->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
+        auto pi = (struct in_pktinfo *)CMSG_DATA(cm);
+        pi->ipi_ifindex = ifindex;
+        pi->ipi_spec_dst = from;
+    }
 
     if(sendmsg(sock, &msg, 0) < 0) {
-        LOG(LS_UDP, LL_IMPORTANT, "Unable to send UDP packet: %s", strerror(errno));
+        // Per packet on the return path, so a persistent failure (for example ENOBUFS) is logged on the first
+        // occurrence and then every 4096th.
+        const int err = errno;
+        static std::atomic<uint64_t> failures{0};
+        const uint64_t n = failures.fetch_add(1, std::memory_order_relaxed);
+        if((n & 0xFFF) == 0)
+            LOG(LS_UDP, LL_IMPORTANT, "Unable to send UDP packet to GWLB: "s + errText(err) + " (failures so far: "s + std::to_string(n + 1) +
+                ", logging the first and every 4096th)."s);
         return false;
     }
     return true;
 }
 
-const std::string base60 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+static constexpr char base60[] = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 /**
  * Convert a 64 bit number to base60 notation. Note: With a uint64_t, the maximum return from this is "uur953OEv0f".
  *
@@ -162,9 +203,9 @@ std::string timepointDeltaString(std::chrono::steady_clock::time_point t1, std::
     long delta = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t2).count();
     std::string ret;
 
-    if (delta > 86400000) { ret += std::to_string((long)delta / 86400000) + "d "s; delta = delta % 86400000; }
-    if (delta > 3600000) { ret += std::to_string((long)delta / 3600000) + "h"s; delta = delta % 3600000; }
-    if (delta > 60000) { ret += std::to_string((long)delta / 60000) + "m"s; delta = delta % 60000; }
+    if (delta >= 86400000) { ret += std::to_string(delta / 86400000) + "d "s; delta = delta % 86400000; }
+    if (delta >= 3600000) { ret += std::to_string(delta / 3600000) + "h"s; delta = delta % 3600000; }
+    if (delta >= 60000) { ret += std::to_string(delta / 60000) + "m"s; delta = delta % 60000; }
     snprintf(tbuf, 31, "%.3f", float(delta / 1000.0));
     ret += tbuf + "s"s;
 
@@ -196,60 +237,6 @@ std::string sockaddrToName(struct sockaddr *sa)
 }
 
 /**
- * Parse input parameters of thread count and core configuration, and populate the ThreadConfig. A thread configuration
- * string is a comma-separated list of cores or ranges, i.e. 1,2,4-6,8.
- *
- * @param threadcount Number of threads requested on command line, if provided,  0 if not. Defaults to 1, if needed.
- * @param affinity The thread affinity string requested on command line.
- * @param dest
- * @return None, but raises exceptions on error (generally a threadcfg that doesn't make sense)
- */
-void ParseThreadConfiguration(int threadcount, std::string& affinity, ThreadConfig *dest)
-{
-    // Handle case when the detailed thread configuration wasn't passed, and we just want some threads.
-    if(affinity.empty())
-    {
-        if(threadcount == 0)
-            dest->cfg.resize(1, -1);
-        else
-            dest->cfg.resize(threadcount, -1);
-    } else {
-        // Parse the threadcfg string.
-        dest->cfg.resize(0);
-        size_t pos = 0;
-        while(pos < affinity.length())
-        {
-            // Find next comma if any, pull out substring.
-            size_t comma_pos = affinity.find(",",pos);
-            if(comma_pos == std::string::npos)
-                comma_pos = affinity.length();
-            std::string range = affinity.substr(pos, comma_pos - pos);
-            // Is this a range?
-            size_t dash_pos = range.find("-");
-            if(dash_pos == std::string::npos)
-            {
-                // Nope, just a bare number.
-                dest->cfg.push_back(std::stoi(range));
-            } else {
-                int start = std::stoi(range.substr(0, dash_pos));
-                int end = std::stoi(range.substr(dash_pos + 1));
-                for(int i = start ; i <= end ; i ++)
-                {
-                    dest->cfg.push_back(i);
-                }
-            }
-            // Move up.
-            pos = comma_pos + 1;
-        }
-    }
-    // Do some checks.
-    if(dest->cfg.size() > MAX_THREADS)
-        throw std::length_error("The number of threads specified ("s + std::to_string(dest->cfg.size()) + ") exceeds the maximum allowed ("s + std::to_string(MAX_THREADS) + "). Recompile code and increase MAX_THREADS in utils.h if you need more."s);
-
-    // We will check the ability to set affinity at set time.
-}
-
-/**
  * Convert a GWLB endpoint id to its hex string. Rendered as 17-char zero-padded
  * hex, matching the "vpce-" endpoint id as shown in the AWS console.
  * @param eni
@@ -257,14 +244,100 @@ void ParseThreadConfiguration(int threadcount, std::string& affinity, ThreadConf
  */
 std::string MakeGwlbeStr(gwlbeid_t eni)
 {
-    std::stringstream ss;
-
-    ss << std::hex << std::setw(17) << std::setfill('0') << eni << std::dec;
-    return ss.str();
+    return stringFormat("%017" PRIx64, (uint64_t)eni);
 }
 
 
 
+
+
+static int g_rawSndBufBytes = DEFAULT_SNDBUF_MB * 1024 * 1024;
+
+int setCurrentThreadAffinity(int core)
+{
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if(core >= 0)
+        CPU_SET(core, &set);
+    else if(sched_getaffinity(getpid(), sizeof(set), &set) != 0)   // the main thread's mask; gwlbtun never pins it
+        return errno;
+    return pthread_setaffinity_np(pthread_self(), sizeof(set), &set);   // returns the error; doesn't set errno
+}
+
+void setRawSendBufferSize(int megabytes)
+{
+    g_rawSndBufBytes = megabytes * 1024 * 1024;
+}
+
+/**
+ * Set a raw send socket's send buffer. A full buffer makes the sending tunnel thread wait, which on busy
+ * hosts was the largest cost on the return path. SO_SNDBUFFORCE (gwlbtun has CAP_NET_ADMIN) isn't capped
+ * by net.core.wmem_max; plain SO_SNDBUF is the fallback. The kernel doubles the value for its overhead.
+ */
+static void applyRawSendBuffer(int sock)
+{
+    const int sndbuf = g_rawSndBufBytes;
+    if(sndbuf > 0 && setsockopt(sock, SOL_SOCKET, SO_SNDBUFFORCE, &sndbuf, sizeof(sndbuf)) < 0)
+        setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+}
+
+// A raw send socket with the --sndbuf buffer, or an empty UniqueFd (errno set) if socket() fails.
+static UniqueFd tryOpenRawSendSocket()
+{
+    UniqueFd sock(socket(AF_INET, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_RAW));
+    if(sock)
+        applyRawSendBuffer(sock.get());
+    return sock;
+}
+
+UniqueFd openRawSendSocket()
+{
+    UniqueFd sock = tryOpenRawSendSocket();
+    if(!sock)
+        throw std::system_error(errno, std::generic_category(), "Unable to open a raw socket for sending traffic to GWLB");
+    return sock;
+}
+
+EventFd::EventFd() : fd(eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC))
+{
+    if(!fd)
+        throw std::system_error(errno, std::generic_category(), "Unable to create an eventfd");
+}
+
+void EventFd::signal() const noexcept
+{
+    const int savedErrno = errno;   // may be called from a signal handler
+    uint64_t one = 1;
+    // Can only fail with EAGAIN if the counter would overflow (2^64 - 2 signals): it's readable either way.
+    [[maybe_unused]] ssize_t r = ::write(fd.get(), &one, sizeof(one));
+    errno = savedErrno;
+}
+
+bool EventFd::waitFor(int ms) const noexcept
+{
+    struct pollfd pfd{ fd.get(), POLLIN, 0 };
+    int r;
+    while((r = poll(&pfd, 1, ms)) < 0 && errno == EINTR)
+        ;
+    return r > 0;
+}
+
+ThreadRawSendSocket::ThreadRawSendSocket() : fd(tryOpenRawSendSocket())
+{
+    if(!fd)
+    {
+        const int err = errno;
+        LOG(LS_TUNNEL, LL_IMPORTANT, "Unable to open a per-thread raw send socket ("s + errText(err) +
+            "); this thread uses the endpoint's shared socket."s);
+        return;
+    }
+    t_rawSendSock = fd.get();
+}
+
+ThreadRawSendSocket::~ThreadRawSendSocket()
+{
+    t_rawSendSock = -1;
+}
 
 // --- Coarse monotonic clock (see utils.h) -----------------------------------
 std::atomic<uint32_t> g_coarseSec{0};

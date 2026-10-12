@@ -54,6 +54,29 @@ jobs:
           path: dist/gwlbtun-linux-${{ matrix.arch }}
           if-no-files-found: error
 
+  test:
+    name: test (${{ matrix.arch }})
+    # The local test suite (tests/), standard and NO_RETURN_TRAFFIC builds, in a privileged AL2023 container
+    # (the tests create tun devices and network namespaces). No AWS access is needed.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs_on: ubuntu-24.04
+          - arch: aarch64
+            runs_on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs_on }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build and test in Amazon Linux 2023 container
+        run: |
+          docker run --rm --privileged -v "$PWD":/src -w /src amazonlinux:2023 \
+            bash .github/scripts/test-al2023.sh
+
   release-latest:
     name: release (latest, push to main)
     needs: build

@@ -4,7 +4,7 @@
 
 # This version of the create-nat script deals with multiple endpoints that may have overlapping IP CIDR ranges.
 
-# Note: This requires this instance to have Source/Dest check disabled.
+# Note: This requires this instance to have Source/Dest check disabled, as for any NAT instance (https://docs.aws.amazon.com/vpc/latest/userguide/work-with-nat-instances.html).
 # aws ec2 modify-instance-attribute --instance-id=<instID> --no-source-dest-check
 
 echo Mode is $1, In Int is $2, Out Int is $3, ENI is $4
@@ -67,9 +67,13 @@ if [ "$1" = "CREATE" ]; then
   ip rule add fwmark $TABLENUM table $4
   # Ignore reverse path filter for this interface
   echo 0 > /proc/sys/net/ipv4/conf/$2/rp_filter
+  # Nothing on a GWLB tunnel answers IPv6 router solicitations, and the kernel's retries would count as
+  # tunnel activity (keeping -t from ever timing the tunnel out). IPv6 traffic through the tunnel is unaffected.
+  echo 0 > /proc/sys/net/ipv6/conf/$2/router_solicitations
+  echo 0 > /proc/sys/net/ipv6/conf/$3/router_solicitations
 
 else
-  echo "==> Destroying up two-armed NAT"
+  echo "==> Removing two-armed NAT"
 
   # Delete our rules we created
   ip rule del fwmark $TABLENUM table $4
