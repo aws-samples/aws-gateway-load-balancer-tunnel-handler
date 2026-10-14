@@ -5,15 +5,15 @@ Parameters:
   LinuxAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Description: AMI ID to use for GWLB appliances
-    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64'
   GWLBInstanceType:
     Type: String
-    Description: Instance type code to use for the GWLB appliances. The default is fine for light testing, for heavier workloads you should consider a c5n instance.
-    Default: t2.micro
+    Description: Instance type code to use for the GWLB appliances. The default is fine for light testing, for heavier workloads consider a network-optimized instance such as a c6in.
+    Default: t2.small
   ApplicationInstanceType:
     Type: String
     Description: Instance type code to use for the application.
-    Default: t2.micro
+    Default: t2.small
 
 Resources:
   EC2Role:
@@ -136,6 +136,9 @@ Resources:
       GatewayLoadBalancerArns:
         - !Ref GWLB
       AcceptanceRequired: false
+      SupportedIpAddressTypes:
+        - ipv4
+        - ipv6
 
   GWLBe:
     Type: AWS::EC2::VPCEndpoint
@@ -146,11 +149,11 @@ Resources:
       VpcId: !Ref ApplicationVPC
       ServiceName: !Sub "com.amazonaws.vpce.${AWS::Region}.${GWLBEndpointService}"
       VpcEndpointType: GatewayLoadBalancer
+      IpAddressType: dualstack
       SubnetIds:
         - !Ref ApplicationGWLBeSubnet
 
   # Build a GWLBTun instance.
-  # The yum installs tc for AL2, iproute-tc for AL2022. One or the other will always fail - this is expected.
   GWLBTunInstanceOneArm:
     Type: AWS::EC2::Instance
     Properties:
@@ -170,28 +173,18 @@ Resources:
       UserData:
         Fn::Base64: |
           #!/bin/bash -ex
-          yum -y groupinstall "Development Tools"
-          yum -y install cmake3
-          yum -y install tc || true
-          yum -y install iproute-tc || true
+          dnf install -y gcc gcc-c++ cmake make git iproute-tc
           cd /root
           git clone https://github.com/aws-samples/aws-gateway-load-balancer-tunnel-handler.git
           cd aws-gateway-load-balancer-tunnel-handler
-          cmake3 .
-          make
-
-          echo "[Unit]" > /usr/lib/systemd/system/gwlbtun.service
-          echo "Description=AWS GWLB Tunnel Handler" >> /usr/lib/systemd/system/gwlbtun.service
-          echo "" >> /usr/lib/systemd/system/gwlbtun.service
-          echo "[Service]" >> /usr/lib/systemd/system/gwlbtun.service
-          echo "ExecStart=/root/aws-gateway-load-balancer-tunnel-handler/gwlbtun -c /root/aws-gateway-load-balancer-tunnel-handler/example-scripts/create-passthrough.sh -p 80" >> /usr/lib/systemd/system/gwlbtun.service
-          echo "Restart=always" >> /usr/lib/systemd/system/gwlbtun.service
-          echo "RestartSec=5s" >> /usr/lib/systemd/system/gwlbtun.service
-
+          cmake . && make
+          install -m 755 gwlbtun /usr/local/bin/gwlbtun
+          mkdir -p /etc/gwlbtun /opt/gwlbtun
+          install -m 755 example-scripts/create-passthrough.sh /opt/gwlbtun/
+          printf 'cmdnew: /opt/gwlbtun/create-passthrough.sh\nport: 80\n' > /etc/gwlbtun/gwlbtun.yaml
+          install -m 644 example-scripts/gwlbtun.service /etc/systemd/system/gwlbtun.service
           systemctl daemon-reload
           systemctl enable --now --no-block gwlbtun.service
-          systemctl start gwlbtun.service
-          echo
       Tags:
         - Key: Name
           Value: !Join [ "-", [ !Ref AWS::StackName, "GWLBTun" ] ]
@@ -440,165 +433,6 @@ Resources:
       Tags:
         - Key: Name
           Value: !Join [ "-", [ !Ref AWS::StackName, "Application" ] ]
-
-  # Do the fixes to our endpoint to allow IPv6 to work, until IPv6 support is added to CF.
-  LambdaGWLBeIPv6FixRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "${AWS::StackName}-LambdaGWLBeIPv6Fix"
-      Description: Role for Cloudformation lambda script GWLBeIPv6Fix
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: { Service: [ lambda.amazonaws.com ] }
-            Action: [ 'sts:AssumeRole' ]
-      Policies:
-        - PolicyName: AllowModifyVPCEndpoint
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: "Allow"
-                Action:
-                  - ec2:ModifyVpcEndpoint
-                Resource: !Sub "arn:aws:ec2:*:${AWS::AccountId}:vpc-endpoint/*"
-      Path: "/"
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-
-  # Pass in the endpoint ID as GWLBeId. The version of botocore in lambda is too old to recognize the IpAddressType
-  # parameter, thus the install of a newer version at the start.
-  LambdaGWLBeIPv6Fix:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub "${AWS::StackName}-GWLBeIPv6Fix"
-      Handler: index.handler
-      Role: !GetAtt LambdaGWLBeIPv6FixRole.Arn
-      Timeout: 30
-      Code:
-        ZipFile: |
-          import sys
-          from pip._internal import main
-
-          main(['install', '-I', '-q', 'boto3', '--target', '/tmp/', '--no-cache-dir', '--disable-pip-version-check'])
-          sys.path.insert(0,'/tmp/')
-
-          import boto3
-          import cfnresponse
-          import threading
-          import logging
-          import botocore
-          import time
-
-          def timeout(event, context):
-            logging.error('Execution is about to time out, sending failure response to CloudFormation')
-            cfnresponse.send(event, context, cfnresponse.FAILED, {}, None, reason="Execution timeout")
-
-          def handler(event, context):
-            timer = threading.Timer((context.get_remaining_time_in_millis() / 1000.00) - 0.5, timeout, args=[event, context])
-            timer.start()
-            try:
-              if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
-                ec2 = boto3.client('ec2')
-                res = ec2.modify_vpc_endpoint(VpcEndpointId=event['ResourceProperties']['GWLBeId'], IpAddressType='dualstack')
-                if 'Return' in res and res['Return'] == True:
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, res, event['ResourceProperties']['GWLBeId'])
-                else:
-                  logging.error(f"modify_vpc_endpoint returned something other than True: {res}")
-                  cfnresponse.send(event, context, cfnresponse.FAILED, res)
-              else:
-                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
-            except Exception as e:
-                logging.error('Exception: %s' % e, exc_info=True)
-                logging.error(f"Data from request:\nevent={event}\ncontext={context}")
-                cfnresponse.send(event, context, cfnresponse.FAILED, {"e": f'{e}'})
-                raise e
-      Runtime: python3.9
-
-  GWLBeIPv6:
-    Type: Custom::GWLBIPV6
-    DependsOn:
-      - GWLBESIPv6
-    Properties:
-      ServiceToken: !GetAtt LambdaGWLBeIPv6Fix.Arn
-      GWLBeId: !Ref GWLBe
-
-  LambdaGWLBESIPv6FixRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "${AWS::StackName}-LambdaGWLBESIPv6Fix"
-      Description: Role for Cloudformation lambda script GWLBESIPv6Fix
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: { Service: [ lambda.amazonaws.com ] }
-            Action: [ 'sts:AssumeRole' ]
-      Policies:
-        - PolicyName: AllowModifyVPCEndpoint
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: "Allow"
-                Action:
-                  - ec2:ModifyVpcEndpointServiceConfiguration
-                Resource: !Sub "arn:aws:ec2:*:${AWS::AccountId}:vpc-endpoint-service/*"
-      Path: "/"
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-
-  LambdaGWLBESIPv6Fix:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub "${AWS::StackName}-GWLBESIPv6Fix"
-      Handler: index.handler
-      Role: !GetAtt LambdaGWLBESIPv6FixRole.Arn
-      Timeout: 30
-      Code:
-        ZipFile: |
-          import sys
-          from pip._internal import main
-
-          main(['install', '-I', '-q', 'boto3', '--target', '/tmp/', '--no-cache-dir', '--disable-pip-version-check'])
-          sys.path.insert(0,'/tmp/')
-
-          import boto3
-          import cfnresponse
-          import threading
-          import logging
-          import botocore
-          import time
-
-          def timeout(event, context):
-            logging.error('Execution is about to time out, sending failure response to CloudFormation')
-            cfnresponse.send(event, context, cfnresponse.FAILED, {}, None, reason="Execution timeout")
-
-          def handler(event, context):
-            timer = threading.Timer((context.get_remaining_time_in_millis() / 1000.00) - 0.5, timeout, args=[event, context])
-            timer.start()
-            try:
-              if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
-                ec2 = boto3.client('ec2')
-                res = ec2.modify_vpc_endpoint_service_configuration(ServiceId=event['ResourceProperties']['GWLBES'], AddSupportedIpAddressTypes=['ipv6'])
-                if 'Return' in res and res['Return'] == True:
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, res, event['ResourceProperties']['GWLBES'])
-                else:
-                  logging.error(f"modify_vpc_endpoint returned something other than True: {res}")
-                  cfnresponse.send(event, context, cfnresponse.FAILED, res)
-              else:
-                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
-            except Exception as e:
-                logging.error('Exception: %s' % e, exc_info=True)
-                logging.error(f"Data from request:\nevent={event}\ncontext={context}")
-                cfnresponse.send(event, context, cfnresponse.FAILED, {"e": f'{e}'})
-                raise e
-      Runtime: python3.9
-
-  GWLBESIPv6:
-    Type: Custom::GWLBIPV6
-    Properties:
-      ServiceToken: !GetAtt LambdaGWLBESIPv6Fix.Arn
-      GWLBES: !Ref GWLBEndpointService
 
 Outputs:
   GWLBES:

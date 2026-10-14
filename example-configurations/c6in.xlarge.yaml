@@ -1,0 +1,30 @@
+# gwlbtun configuration for a small appliance: c6in.xlarge (4 vCPUs, 4 network queues), one ENI.
+# Run with:   gwlbtun -f /etc/gwlbtun/c6in.xlarge.yaml
+# Keys are gwlbtun's long option names (see gwlbtun -h); options on the command line override this file.
+# Check what a file and command line add up to with:   gwlbtun -f <file> --show-config
+#
+# On small instances the defaults are the right thread layout: one UDP receiver thread per network queue
+# (each tied to its queue) and one tunnel thread per vCPU. So this file only sets the hooks, the health
+# check and housekeeping; it pins nothing.
+
+# Hook scripts, run when an endpoint's gwi-/gwo- interfaces are created and before they're destroyed.
+# create-route.sh routes traffic back out after the operating system has processed it; see
+# example-scripts/ for other behaviours (passthrough, NAT, local services).
+cmdnew: /opt/gwlbtun/create-route.sh
+cmddel: /opt/gwlbtun/create-route.sh
+
+# Health check for the GWLB target group (TCP or HTTP on port 80). json: true makes the detailed report
+# machine-readable for monitoring; GWLB itself only looks at the HTTP status code.
+port: 80
+json: true
+
+# Tear down an endpoint's interfaces after 300 seconds without traffic (0 = never).
+timeout: 300
+
+# TCP flow-cache idle timeout. Keep it equal to the GWLB listener's TCP idle timeout (350 by default; above
+# 350, GWLB's documentation says the appliance ENI's TcpEstablishedTimeout must be at least as long).
+idle: 350
+
+# Receive buffer per UDP socket, in MB. Needs net.core.rmem_max at least this large:
+#   sysctl -w net.core.rmem_max=268435456
+rcvbuf: 128

@@ -1,0 +1,25 @@
+# CMake output (in-source `cmake3 . && make` and out-of-source build dirs)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+/version.h
+/gwlbtun
+build/
+build-*/
+cmake-build-*/
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Packet captures and core dumps
+*.pcap
+*.pcapng
+core
+core.*
+
+# Test suite
+__pycache__/

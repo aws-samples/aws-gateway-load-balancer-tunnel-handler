@@ -12,6 +12,7 @@
 #include <string>
 #include <sstream>
 #include <iostream>
+#include <future>
 #include "utils.h"
 
 // Log Section (LS_) defines
@@ -49,24 +50,35 @@ struct LoggingMessage {
 
 extern class Logger *logger;
 
+// LOG(section, level, msg) logs msg exactly as given; a std::string message is never used as a
+// printf format, so text that came from packets, interface names or exceptions can't inject
+// format directives. LOG(section, level, "fmt %d", args...) formats with printf rules, and the
+// compiler checks the format against the arguments. A bare const char * (such as e.what()) picks the
+// printf overload, so wrap text that isn't a format in std::string.
 #define LOG(s,l,msg,...) do { if(logger->cfg.ll[s] >= l) logger->Log(s, l, msg, ##__VA_ARGS__); } while(0)
-#define LOGHEXDUMP(s,l,hdr,buf,buflen) do { if(logger->cfg.ll[s] >= l) logger->LogHexDump(s, l, buf, buflen); } while(0)
-#define IS_LOGGING(s,l) (logger->cfg.ll[s] <= l)
-#define ts(s)  std::to_string(s)
+#define LOGHEXDUMP(s,l,hdr,buf,buflen) do { if(logger->cfg.ll[s] >= l) logger->LogHexDump(s, l, hdr, buf, buflen); } while(0)
+#define IS_LOGGING(s,l) (logger->cfg.ll[s] >= l)
+// Shorthand for std::to_string in log messages.
+template<class T> inline std::string ts(T v) { return std::to_string(v); }
 
 class Logger {
 public:
-    Logger(std::string loggingOptions);
+    explicit Logger(const std::string &loggingOptions);
+    Logger(const Logger &) = delete;
+    Logger &operator=(const Logger &) = delete;
     ~Logger();
-    std::string help();    // Return help text for configuring the logger.
+    static std::string help();    // Return help text for configuring the logger.
     const LoggingConfiguration cfg;
-    void Log(LogSection ls, LogLevel ll, const std::string& fmt_str, ...);
-    void LogHexDump(LogSection ls, LogLevel ll, const void *buf, std::size_t bufLen);
+    void Log(LogSection ls, LogLevel ll, const std::string& msg);                                 // Logged as-is
+    void Log(LogSection ls, LogLevel ll, const char *fmt, ...) __attribute__((format(printf, 4, 5))); // printf-style
+    void LogHexDump(LogSection ls, LogLevel ll, const std::string &title, const void *buf, std::size_t bufLen);
 
 private:
-    bool shouldTerminate;
+    bool shouldTerminate = false;     // Guarded by queue_mutex
 
-    LoggingConfiguration optionsParse(std::string loggingOptions);
+    void enqueue(LogSection ls, LogLevel ll, std::string msg);
+
+    static LoggingConfiguration optionsParse(const std::string &loggingOptions);
     void threadFunc();
 
     // Logging queue
@@ -74,17 +86,9 @@ private:
     std::condition_variable queue_condvar;
     std::queue<struct LoggingMessage> queue;
     
-    // Thread startup synchronization
-    std::mutex startup_mutex;
-    std::condition_variable startup_condvar;
-    bool thread_ready;
+    std::promise<void> ready;   // set by threadFunc once it's running; the constructor waits for it
 
-    // Declared LAST so the thread is constructed -- and threadFunc() starts running --
-    // only AFTER every member it touches (queue_mutex/condvar, queue, startup_*,
-    // thread_ready) is constructed. Members init in declaration order, so starting the
-    // thread earlier raced with their construction (TSan-confirmed; this is also the
-    // historical v2.5 "crash on startup if the logger thread didn't initialize quick
-    // enough" footgun).
+    // ORDER MATTERS: LAST. threadFunc uses every member above, so the thread starts only once they all exist.
     std::thread thread;
 };
 

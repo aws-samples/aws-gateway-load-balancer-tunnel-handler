@@ -1,0 +1,50 @@
+# systemd unit for gwlbtun.
+#
+# Install:
+#   sudo install -m 755 gwlbtun /usr/local/bin/gwlbtun
+#   sudo mkdir -p /etc/gwlbtun /opt/gwlbtun
+#   sudo install -m 755 example-scripts/create-route.sh /opt/gwlbtun/       # or the hook you need
+#   sudo install -m 644 example-configurations/c6in.xlarge.yaml /etc/gwlbtun/gwlbtun.yaml   # then edit it
+#   sudo install -m 644 example-scripts/gwlbtun.service /etc/systemd/system/gwlbtun.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now gwlbtun
+#
+# Logs go to the journal:   journalctl -u gwlbtun
+# Check the configuration:  /usr/local/bin/gwlbtun -f /etc/gwlbtun/gwlbtun.yaml --show-config
+# To change options without editing this file, use `systemctl edit gwlbtun` (a drop-in that overrides
+# ExecStart needs an empty "ExecStart=" line first), or edit /etc/gwlbtun/gwlbtun.yaml.
+
+[Unit]
+Description=AWS Gateway Load Balancer Tunnel Handler (gwlbtun)
+Documentation=https://github.com/aws-samples/aws-gateway-load-balancer-tunnel-handler
+# GENEVE arrives on the instance's network interfaces, and -I / -p IFNAME:PORT need them to exist.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gwlbtun -f /etc/gwlbtun/gwlbtun.yaml
+Restart=on-failure
+RestartSec=3
+
+# gwlbtun stops all endpoints at once on SIGTERM and runs each one's DESTROY hook before exiting.
+# KillMode=mixed sends SIGTERM to gwlbtun only, so hooks that are running aren't killed mid-way;
+# anything still running when the timeout expires is killed. Allow longer if your hooks are slow or
+# you serve many endpoints.
+KillMode=mixed
+TimeoutStopSec=90
+
+# Each GWLB endpoint has --tunthreads threads on each of its two tunnel interfaces, and each thread holds
+# a tun queue and a raw socket, so large instances with many endpoints need tens of thousands of file
+# descriptors. (gwlbtun also raises its soft limit to the hard limit at startup, and logs how many
+# endpoints fit.)
+LimitNOFILE=1048576
+
+# gwlbtun needs CAP_NET_ADMIN (tun devices, socket options) and CAP_NET_RAW (raw sockets back to GWLB),
+# and runs the hook scripts, which usually configure routing, tc, iptables and sysctls; so it runs as
+# root. If your hooks need less, you can narrow what root may do, for example:
+#   CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_MODULE
+#   ProtectHome=yes
+#   PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
