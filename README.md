@@ -36,6 +36,8 @@ A specific version, frozen for pinning (e.g. v3.3):
 curl -LO https://github.com/aws-samples/aws-gateway-load-balancer-tunnel-handler/releases/download/v3.3/gwlbtun-linux-x86_64
 ```
 
+Each release also has a build with the [eBPF datapath](#ebpf-acceleration--e): `gwlbtun-ebpf-linux-x86_64` (or `-aarch64`) and its `gwlbtun-ebpf-linux-x86_64.o`. That binary needs libbpf installed (`dnf install libbpf` on AL2023); the plain one doesn't.
+
 All releases, with changelogs, are on the [Releases page](https://github.com/aws-samples/aws-gateway-load-balancer-tunnel-handler/releases). You can confirm the version of a downloaded binary with `./gwlbtun-linux-x86_64 -h` (the first line reports e.g. `v3.3`).
 
 ## To Compile
@@ -46,6 +48,8 @@ sudo dnf install -y gcc gcc-c++ cmake make git
 ```
 
 In the directory with the source code, do ```cmake . && make``` to build. This code works with both Intel and Graviton-based architectures.
+
+To build the eBPF datapath (`-e`) too, also install clang and libbpf-devel (`sudo dnf install -y clang libbpf-devel`). The build then produces `gwlbtun-ebpf.o` next to `gwlbtun`, and `gwlbtun` links libbpf. Without them, cmake notes that the eBPF datapath wasn't built and gwlbtun builds without it. `-DGWLBTUN_EBPF=ON` makes a missing clang or libbpf-devel an error, and `-DGWLBTUN_EBPF=OFF` builds without eBPF even if they're installed.
 
 **This version has integrated Boost libraries from 1.92 - no additional Boost download is required (as opposed to previous versions).**
 
@@ -58,7 +62,7 @@ gwlbtun can be launched in several different ways - native CLI or in a container
 For Linux, the application requires CAP_NET_ADMIN capability to create the tunnel interfaces along with the example helper scripts.
 
 ```
-AWS Gateway Load Balancer Tunnel Handler v3.3
+AWS Gateway Load Balancer Tunnel Handler v4.0
 Usage: ./gwlbtun [options]
 Example: ./gwlbtun
 
@@ -105,6 +109,15 @@ Performance options:
                            Prefix with 'vpce-<id>:' to override a specific GWLB endpoint; repeat for several.
                            e.g. --reserve 5000000,50000,50000,20,20,20 --reserve vpce-0abc...:2000000,2000000,1024,1024,1024,1024
 
+eBPF options (Linux 6.6 or later):
+  -e FILE                  Load gwlbtun's eBPF datapath from FILE (gwlbtun-ebpf.o, built with gwlbtun) and attach it to
+                           the interfaces gwlbtun receives GENEVE on (-I, or else the default-route interface). Packets
+                           of flows gwlbtun has learned then pass between those interfaces and gwi-/gwo- in the kernel,
+                           without being copied to and from gwlbtun. (--ebpf)
+  --ebpf-reserve V4,V6     How many IPv4 and IPv6 flows the eBPF maps hold, for all GWLB endpoints together. Flows
+                           beyond that stay on the userspace path. Default: one endpoint's --reserve (the sum of its
+                           IPv4 and of its IPv6 counts).
+
 AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.
 By default (--udpaffinity nearest) gwlbtun starts one UDP thread per receive queue of each interface it receives
 on, pinned near its queue (or one unpinned thread per core, <N>, if it can't find the queues). Whenever an interface
@@ -132,7 +145,7 @@ The <X> in the interface name is replaced with the GWLB endpoint ID encoded in b
 list, so processes serving the same endpoint on different interfaces get different devices.
 ---------------------------------------------------------------------------------------------------------
 The logging configuration can be set by passing a string to the --logging option. That string is a series of <section>=<level>, comma separated and case insensitive.
-The available sections are: core udp geneve tunnel healthcheck os all 
+The available sections are: core udp geneve tunnel healthcheck os ebpf all 
 The logging levels available for each are: critical important info debug debugdetail 
 The default level for all sections is 'info'.
 ```
@@ -170,6 +183,35 @@ By default gwlbtun accepts GENEVE (UDP 6081) on every interface and serves its h
 Replies to GWLB always leave by the interface the endpoint's traffic arrived on, from the address it arrived at, whether or not `-I` is used. This matters when an instance has more than one ENI registered as a GWLB target: without it, the kernel would route replies by destination alone and could send them out of the wrong ENI, where EC2's source/destination check drops them.
 
 One process can serve all interfaces, or several processes can each serve their own interfaces with `-I` (for example one per ENI, as separate failure domains). gwlbtun refuses to start if that would mean two processes receiving on the same interface, or a process without `-I` alongside any other. If two processes try to create the same tunnel device, the second one logs `Unable to create TUN device ... (IFF_TUN_EXCL): a device with that name already exists - is this the only gwlbtun trying to use it?`, drops that endpoint's packets, and retries every 5 seconds.
+
+### eBPF acceleration (-e)
+With `-e gwlbtun-ebpf.o`, gwlbtun loads two small eBPF programs that carry the packets of flows it has already learned, so they no longer pass through gwlbtun's sockets and tun devices:
+
+- On each interface gwlbtun receives GENEVE on (the `-I` interfaces, or else the one with the default route), a tcx ingress program strips GWLB's GENEVE encapsulation from a known flow's packets and delivers them into the endpoint's `gwi-` interface, as if gwlbtun had written them there.
+- On each `gwo-` interface, a tc action puts back the encapsulation gwlbtun would have sent a known flow's reply with (the same outer headers, including the GENEVE options) and transmits it to GWLB.
+
+gwlbtun still learns every flow from its first packet, as before, and puts it in the eBPF maps. Everything an operator attaches to `gwi-` and `gwo-` (routing, iptables/nftables, tc, a userspace inspector) runs as before: the programs only skip gwlbtun's own copies. Anything they can't handle exactly as userspace would goes to userspace unchanged, and works as without `-e`.
+
+```
+./gwlbtun -e ./gwlbtun-ebpf.o -I ens6 -p ens6:80 -c ./create-route.sh
+```
+
+Requirements:
+- Linux 6.6 or later (the ingress program is attached with tcx). On an older kernel gwlbtun stops at startup with a message saying so. Amazon Linux 2023 offers 6.12 and 6.18 kernels besides 6.1, as AMIs and as packages for existing instances; see [Linux kernel versions on AL2023](https://docs.aws.amazon.com/linux/al2023/ug/kernel-update.html).
+- A gwlbtun built with eBPF support (see [To Compile](#to-compile), or the `gwlbtun-ebpf-*` release files), and the `gwlbtun-ebpf.o` built with it.
+- libbpf, tc (the `iproute-tc` package), and the BPF filesystem mounted at `/sys/fs/bpf` (systemd mounts it at boot).
+- root: loading and attaching eBPF programs needs privileges (CAP_BPF and CAP_NET_ADMIN among them) beyond what gwlbtun needs for its tunnels.
+
+What stays in userspace:
+- Flows that don't fit in the maps. `--ebpf-reserve V4,V6` sets how many IPv4 and IPv6 flows they hold for all endpoints together (by default, one endpoint's `--reserve` totals); the health check counts flows that didn't fit.
+- Packets whose flow the programs can't key the way gwlbtun's flow cache does: later fragments of TCP or UDP packets, and IPv6 packets with extension headers. GENEVE packets with other than GWLB's usual three options, or with IP options or fragmentation in the outer header, also take the userspace path.
+- A second inner flow that arrives with a flow cookie already in use by another: only the flow the cookie was learned for is carried in the kernel.
+- Replies sent back through `gwi-` rather than `gwo-` (the egress program is only on `gwo-`).
+- With several `-I` interfaces, replies to flows that arrived on any but the first: the egress program sends to the first interface, and replies must leave by the interface their flow arrived on.
+
+Flows leave the maps when they leave gwlbtun's flow cache, using the same idle timeouts, and when their endpoint is torn down (`-t`). The ingress program is attached as a link owned by the gwlbtun process, so if gwlbtun exits for any reason, even `kill -9`, the kernel removes it and packets go to the network stack as without gwlbtun.
+
+With `-e`, the health check output has an `ebpf` section: packets carried in the kernel in each direction, why others went to userspace, the map sizes and how many flows didn't fit. Each endpoint also reports `repunts`, packets of flows already in the maps that still reached gwlbtun (normal just after a flow is learned), and `lateRepunts`, those that arrived 5 or more seconds after: a steady rise there means flows aren't being carried in the kernel when they should be.
 
 ### Docker
 The Dockerfile builds a container image for the GWLB tunnel handler:
@@ -304,6 +346,7 @@ That class launches the multithreaded UDP receiver, and then creates GeneveHandl
 The GeneveHandlerENI class instantiates the TunInterfaces as needed, and generally manages the entire packet handling flow for that ENI. 
 GenevePacket and PacketHeader handle parsing and validating GENEVE packets and IP packets respectively, and are called by GeneveHandler as needed.
 Logger handles processing logging messages from all threads, ensuring they get output correctly to terminal, and filtering against the logging configuration provided.
+EbpfHelpers.c is the eBPF datapath (`-e`), built into gwlbtun-ebpf.o; EbpfHelpers.h is the map layout it shares with gwlbtun, and EbpfLoader loads it, attaches it and wraps its maps. GeneveHandlerENI hands flows to the maps and ages them out with its flow caches.
 
 ## Multithreading
 gwlbtun supports multithreading, and doing so is recommended on multicore systems. You can specify either the number of threads, or a specific affinity for CPU cores, for both the UDP receiver and the tunnel handler threads. You should test to see which set of options work best for your workload, especially if you have additional processes doing processing on the device. By default, gwlbtun creates one UDP receive thread per receive queue of each interface, pinned near that queue's CPU (`--udpaffinity nearest`; unpinned when every CPU services a queue, as on most sizes up to about 8 vCPUs; see [ENA queues](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ena-queues.html)), and one tunnel processing thread per core, up to 255 per tunnel interface. `--show-config` prints the layout it will use. For instances with many vCPUs, see [README-Large-Instances.md](README-Large-Instances.md).
@@ -311,7 +354,7 @@ gwlbtun supports multithreading, and doing so is recommended on multicore system
 gwlbtun labels its threads with its name (gwlbtun), and either Uxxx for an unpinned UDP thread, where the number is simply an index, or UAxxx for a pinned one, with the number being the core that thread is pinned to. The tunnel threads are labeled the same, except with a T instead of a U.
 
 ## Tested performance numbers
-Since it's initial release, gwlbtun has had many improvements to its packet processing. More are planned for the upcoming 4.0 branch (which includes eBPF acceleration). Comparing some prior versions (2022.11 pre-Boost, 3.0, 3.2, and now 3.3):
+Since it's initial release, gwlbtun has had many improvements to its packet processing. v4.0 adds the optional eBPF datapath; its numbers will be added here once measured. Comparing some prior versions (2022.11 pre-Boost, 3.0, 3.2, and now 3.3):
 
 | Frame size | 2022.11 (pre-Boost) | v3.0 | v3.2 | v3.3 |
 |------------|--------------------:|-----:|-----:|-----:|

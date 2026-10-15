@@ -1,3 +1,14 @@
+## v4.0 (in development, branch dev-ebpf-v4.0):
+v4.0 adds an optional eBPF datapath (`-e`): packets of flows gwlbtun has learned are carried between the GWLB-facing interface and the endpoint's `gwi-`/`gwo-` interfaces in the kernel, without being copied through gwlbtun. Everything else works as in v3.3, which it's built on. See [eBPF acceleration](README.md#ebpf-acceleration--e) in the README.
+
+- `-e FILE` (`--ebpf`) loads `gwlbtun-ebpf.o`, built alongside gwlbtun when clang and libbpf-devel are installed (`-DGWLBTUN_EBPF=AUTO|ON|OFF`; without them gwlbtun builds as before, with no libbpf dependency). Needs Linux 6.6 or later.
+- The ingress program is attached with tcx to the `-I` interfaces (or the default-route interface) as a link owned by the gwlbtun process, so nothing stays attached if gwlbtun exits, however it exits. It delivers a packet only if it has GWLB's usual encapsulation and both the GWLB endpoint and cookie and the inner flow match what gwlbtun learned; anything else goes to userspace.
+- The egress program, a tc action on each `gwo-` interface followed by mirred, builds the same outer headers userspace sends (including Don't Fragment and IP ID 0). Replies to flows that arrived on another interface than the first `-I` one are returned by userspace, which sends them out of the right interface.
+- gwlbtun's flow cache keeps track of what's in the maps: flows leave the maps when they leave the cache, when a flow's GENEVE data changes (for example a new cookie), and when their endpoint is torn down. Flows carried in the kernel stay in the cache (and their endpoint isn't treated as idle) while the kernel sees their packets.
+- `--ebpf-reserve V4,V6` sizes the maps, for all endpoints together; the default is one endpoint's `--reserve` totals. Flows that don't fit stay in userspace and are counted.
+- The health check reports the eBPF datapath (an `ebpf` section) and, per endpoint, packets of flows already in the maps that still reached gwlbtun. Logging section `ebpf`.
+- Release builds come in two kinds per architecture: `gwlbtun-linux-<arch>` without eBPF support, and `gwlbtun-ebpf-linux-<arch>` with `gwlbtun-ebpf-linux-<arch>.o`.
+
 ## v3.3:
 v3.3 focuses mainly on performance on large instances (many vCPUs, such as the c8in.96xlarge), where earlier versions scaled poorly; smaller instances gain too (a 20-40% higher forwarding ceiling on a c6in.xlarge, the most with small packets). It also adds receive-interface selection (`-I`), configuration files (`-f`), and a set of reliability fixes. Additional static code tests and dynamic tests were added to the test harness, allowing fixing potential bugs. Finally, passes were made at cleaning up the code, and working through suggestions and bug reports from GitHub and elsewhere. Keep the feedback coming!
 
