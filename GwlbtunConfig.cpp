@@ -75,6 +75,8 @@ const OptionDef OPTIONS[] = {
     {"rcvbuf",      0,   true,  false, true},
     {"busypoll",    0,   true,  false, true},
     {"reserve",     0,   true,  true,  true,  "reserve"},
+    {"ebpf",        'e', true,  false, true},
+    {"ebpf-reserve", 0,  true,  false, true},
     {"show-config", 0,   false, false, false},
     {"help",        'h', false, false, false},
 };
@@ -202,6 +204,19 @@ void parseReserve(const std::string &arg, const std::string &where, GwlbtunConfi
     if(idx != 6) throw fail();
     if(isGlobal) c.defaultReserve = vals;
     else c.perEndpointReserve[key] = vals;
+}
+
+// --ebpf-reserve: "V4,V6", the flows the eBPF maps hold for all endpoints together.
+void parseEbpfReserve(const std::string &arg, const std::string &where, GwlbtunConfig &c)
+{
+    auto comma = arg.find(',');
+    std::size_t v4 = 0, v6 = 0;
+    if(comma == std::string::npos || !parseNumber(std::string_view(arg).substr(0, comma), v4) ||
+       !parseNumber(std::string_view(arg).substr(comma + 1), v6) || v4 > MAX_RESERVE || v6 > MAX_RESERVE)
+        throw ConfigError("Invalid "s + where + " '"s + arg + "'. Expected two comma-separated flow counts (IPv4,IPv6), each 0 to "s +
+                          std::to_string(MAX_RESERVE) + "."s);
+    c.ebpfReserve = { v4, v6 };
+    c.ebpfReserveArg = arg;
 }
 
 // --- CPU lists and host topology, for resolving the thread layout ------------------------------------
@@ -500,6 +515,20 @@ public:
         else if(name == "rcvbuf") c.rcvBufSizeMB = (int)parseLong(v, 1, 2047, where, "a size in megabytes, 1 to 2047");
         else if(name == "busypoll") c.busyPollUsec = (int)parseLong(v, 0, 1000000, where, "microseconds, 0 to 1000000");
         else if(name == "reserve") { parseReserve(v, where, c); c.reserveArgs.push_back(v); }
+        else if(name == "ebpf")
+        {
+#ifndef ENABLE_EBPF
+            throw ConfigError("This gwlbtun was built without eBPF support, so "s + where + " can't be used. Build it with clang and "s +
+                              "libbpf-devel installed (see the README)."s);
+#endif
+            if(access(v.c_str(), R_OK) != 0)
+            {
+                const int err = errno;
+                throw ConfigError("Invalid "s + where + " '"s + v + "': "s + std::strerror(err) + "."s);
+            }
+            c.ebpfObject = v;
+        }
+        else if(name == "ebpf-reserve") parseEbpfReserve(v, where, c);
         else if(name == "show-config") c.showConfigRequested = parseBool(v, where);
         else if(name == "help") c.helpRequested = true;
     }
@@ -811,6 +840,13 @@ std::string GwlbtunConfig::toYaml() const
         for(const auto &r : reserveArgs)
             y << "  - " << yamlQuote(r) << "\n";
     }
+    if(!ebpfObject.empty()) line("ebpf", yamlQuote(ebpfObject)); else comment("ebpf", "(none: userspace only)");
+    {
+        const auto f = ebpfFlows();
+        const std::string flows = std::to_string(f[0]) + ","s + std::to_string(f[1]);
+        if(!ebpfReserveArg.empty()) line("ebpf-reserve", yamlQuote(ebpfReserveArg));
+        else comment("ebpf-reserve", "(default, from reserve) "s + flows);
+    }
     return y.str();
 }
 
@@ -887,6 +923,18 @@ std::string GwlbtunConfig::helpText(const char *progname)
             "                           (0 = don't pre-size that cache; at most %zu each). Default %s.\n"
             "                           Prefix with 'vpce-<id>:' to override a specific GWLB endpoint; repeat for several.\n"
             "                           e.g. --reserve 5000000,50000,50000,20,20,20 --reserve vpce-0abc...:2000000,2000000,1024,1024,1024,1024\n"
+            "\n"
+            "eBPF options (Linux 6.6 or later):\n"
+#ifndef ENABLE_EBPF
+            "  This gwlbtun was built without eBPF support, so these options can't be used.\n"
+#endif
+            "  -e FILE                  Load gwlbtun's eBPF datapath from FILE (gwlbtun-ebpf.o, built with gwlbtun) and attach it to\n"
+            "                           the interfaces gwlbtun receives GENEVE on (-I, or else the default-route interface). Packets\n"
+            "                           of flows gwlbtun has learned then pass between those interfaces and gwi-/gwo- in the kernel,\n"
+            "                           without being copied to and from gwlbtun. (--ebpf)\n"
+            "  --ebpf-reserve V4,V6     How many IPv4 and IPv6 flows the eBPF maps hold, for all GWLB endpoints together. Flows\n"
+            "                           beyond that stay on the userspace path. Default: one endpoint's --reserve (the sum of its\n"
+            "                           IPv4 and of its IPv6 counts).\n"
             "\n"
             "AFFIN arguments take a comma separated list of cores or range of cores, e.g. 1-2,4,7-8.\n"
             "By default (--udpaffinity nearest) gwlbtun starts one UDP thread per receive queue of each interface it receives\n"

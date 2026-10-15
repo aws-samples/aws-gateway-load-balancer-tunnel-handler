@@ -60,6 +60,18 @@ struct GwlbtunConfig {
         return it != perEndpointReserve.end() ? it->second : defaultReserve;
     }
 
+    // --- eBPF datapath (-e) ---
+    std::string ebpfObject;                    // -e/--ebpf: the gwlbtun-ebpf.o to load; empty = userspace only
+    std::array<std::size_t, 2> ebpfReserve{};  // --ebpf-reserve: flows the eBPF maps hold, IPv4 and IPv6, all endpoints together
+    std::string ebpfReserveArg;                // --ebpf-reserve as given; empty = from the default --reserve
+    // Flows the eBPF maps are sized for (IPv4, IPv6): --ebpf-reserve, or else one endpoint's default --reserve.
+    std::array<std::size_t, 2> ebpfFlows() const {
+        if(!ebpfReserveArg.empty())
+            return ebpfReserve;
+        const auto &r = defaultReserve;
+        return { r[0] + r[1] + r[2], r[3] + r[4] + r[5] };
+    }
+
     // --- Process (main) ---
     std::string createHook;         // -c: run when an endpoint's interfaces are created
     std::string destroyHook;        // -r: run before an endpoint's interfaces are destroyed
