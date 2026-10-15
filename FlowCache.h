@@ -10,13 +10,16 @@
 #ifndef GWLBTUN_FLOWCACHE_H
 #define GWLBTUN_FLOWCACHE_H
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <boost/unordered/concurrent_flat_map.hpp>
 #include <netinet/in.h>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
+#include <vector>
 #include "HealthCheck.h"
 #include "utils.h"      // coarseTime()
 #include "Logger.h"
@@ -54,10 +57,19 @@ private:
  */
 template <class V> class FlowCacheEntry {
 public:
-    explicit FlowCacheEntry(V entrydata) : last(coarseTime()), data(std::move(entrydata)) {}
+    explicit FlowCacheEntry(V entrydata) : last(coarseTime()), tagTime(last), data(std::move(entrydata)) {}
 
     uint32_t last;
+    uint32_t tagTime;   // coarseTime() when tag was last set (or the entry created)
+    uint8_t tag = 0;    // The owner's per-flow state (GeneveHandlerENI: what the eBPF maps hold for the flow)
     V data;
+};
+
+// What FlowCache::insert() did.
+struct FlowInsertResult {
+    enum Kind : uint8_t { Inserted, Refreshed, Changed } kind;
+    uint8_t tag = 0;          // Refreshed: the entry's tag (Inserted and Changed clear it)
+    uint32_t tagAge = 0;      // Refreshed: seconds since the tag was set
 };
 
 /**
@@ -84,18 +96,51 @@ public:
     }
 
     // Store value for key. A new flow is inserted; a known one has its idle timer refreshed and, if the stored
-    // value differs, it's replaced and the change reported (see reportValueChange).
-    void insert(const K &key, const V &value)
+    // value differs, it's replaced (clearing its tag) and the change reported (see reportValueChange). If
+    // previousOut is given, it receives the value replaced.
+    FlowInsertResult insert(const K &key, const V &value, std::optional<V> *previousOut = nullptr)
     {
         // The stored value changes only rarely; the old one is copied out so the change can be reported after
         // the map's lock is released.
         std::optional<V> previous;
-        cache.try_emplace_or_visit(key, value, [&](auto &e) {
+        FlowInsertResult r{FlowInsertResult::Refreshed};
+        const bool inserted = cache.try_emplace_or_visit(key, value, [&](auto &e) {
             touch(e.second);
-            if(!(e.second.data == value)) { previous = e.second.data; e.second.data = value; }
+            if(!(e.second.data == value))
+            {
+                previous = e.second.data;
+                e.second.data = value;
+                e.second.tag = 0;
+                e.second.tagTime = e.second.last;
+                r.kind = FlowInsertResult::Changed;
+            }
+            else
+            {
+                r.tag = e.second.tag;
+                r.tagAge = e.second.last - e.second.tagTime;
+            }
         });
+        if(inserted)
+            r.kind = FlowInsertResult::Inserted;
         if(__builtin_expect(previous.has_value(), 0))
+        {
             reportValueChange(key, *previous, value);
+            if(previousOut)
+                *previousOut = std::move(previous);
+        }
+        return r;
+    }
+
+    // Set a flow's tag (and its tagTime to now). Returns false if the flow isn't in the cache.
+    bool setTag(const K &key, uint8_t tag)
+    {
+        return cache.visit(key, [&](auto &e) { e.second.tag = tag; e.second.tagTime = coarseTime(); }) != 0;
+    }
+
+    // Call f(key, value, tag) for every entry, under the map's shared locks: f must not use this cache.
+    template<class F> void forEach(F &&f) const
+    {
+        cache.cvisit_all([&](const auto &e) { f(e.first, e.second.data, e.second.tag); });
     }
 
     // Cache status (name, timeout, current size) WITHOUT scanning or evicting: O(1).
@@ -113,6 +158,53 @@ public:
         const size_t removed = cache.erase_if([expireTime](auto &e) { return e.second.last < expireTime; });
         lastSweepRemoved.store(removed, std::memory_order_relaxed);
         return removed;
+    }
+
+    /**
+     * sweep() for a cache whose flows can be active without this cache seeing them (the eBPF datapath carries
+     * their packets). Entries with a tag that this cache hasn't seen for checkAge seconds (at most the idle
+     * timeout) are asked about first: activity(key, value, tag) returns the coarseTime() of the flow's last
+     * activity elsewhere (0 = none), and the entry's timer is moved up to it. Then idle entries are evicted as
+     * in sweep(), and onEvict(key, value, tag) is called for each one that had a tag, after the map's locks are
+     * released. Neither callback is called with a lock held, so both may take their time.
+     *
+     * @return The newest activity (coarseTime()) of any entry left in the cache, 0 if it's empty.
+     */
+    template<class Activity, class Evict> uint32_t sweep(uint32_t checkAge, Activity &&activity, Evict &&onEvict)
+    {
+        const uint32_t now = coarseTime();
+        checkAge = std::min(checkAge, (uint32_t)cacheTimeout);
+        struct Candidate { K key; V value; uint32_t last; uint8_t tag; };
+        std::vector<Candidate> candidates;
+        uint32_t newest = 0;
+        cache.cvisit_all([&](const auto &e) {
+            if(e.second.tag && now - e.second.last >= checkAge)
+                candidates.push_back({ e.first, e.second.data, e.second.last, e.second.tag });
+            else
+                newest = std::max(newest, e.second.last);
+        });
+        for(auto &c : candidates)
+        {
+            const uint32_t seen = activity(c.key, c.value, c.tag);
+            if(seen > c.last)
+                cache.visit(c.key, [seen](auto &e) { if(e.second.last < seen) e.second.last = seen; });
+            if(now - std::max(seen, c.last) <= (uint32_t)cacheTimeout)
+                newest = std::max(newest, std::max(seen, c.last));
+        }
+
+        const uint32_t expireTime = (now > (uint32_t)cacheTimeout) ? (now - (uint32_t)cacheTimeout) : 0;
+        std::vector<std::tuple<K, V, uint8_t>> evicted;
+        const size_t removed = cache.erase_if([&](auto &e) {
+            if(e.second.last >= expireTime)
+                return false;
+            if(e.second.tag)
+                evicted.emplace_back(e.first, e.second.data, e.second.tag);
+            return true;
+        });
+        lastSweepRemoved.store(removed, std::memory_order_relaxed);
+        for(auto &[k, v, t] : evicted)
+            onEvict(k, v, t);
+        return newest;
     }
 
 private:
@@ -159,8 +251,14 @@ public:
         other(family + " Other Flow Cache for " + owner, otherTimeout, reserve[2]) {}
 
     std::optional<V> lookup(const K &key) { return pick(key.prot).lookup(key); }
-    void insert(const K &key, const V &value) { pick(key.prot).insert(key, value); }
+    FlowInsertResult insert(const K &key, const V &value, std::optional<V> *previousOut = nullptr) { return pick(key.prot).insert(key, value, previousOut); }
+    bool setTag(const K &key, uint8_t tag) { return pick(key.prot).setTag(key, tag); }
+    template<class F> void forEach(F &&f) const { tcp.forEach(f); udp.forEach(f); other.forEach(f); }
     void sweep() { tcp.sweep(); udp.sweep(); other.sweep(); }
+    template<class Activity, class Evict> uint32_t sweep(uint32_t checkAge, Activity &&activity, Evict &&onEvict)
+    {
+        return std::max({ tcp.sweep(checkAge, activity, onEvict), udp.sweep(checkAge, activity, onEvict), other.sweep(checkAge, activity, onEvict) });
+    }
     std::array<FlowCacheHealthCheck, 3> stats() const { return { tcp.stats(), udp.stats(), other.stats() }; }
 
 private:

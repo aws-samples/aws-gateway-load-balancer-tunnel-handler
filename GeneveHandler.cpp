@@ -84,6 +84,7 @@ std::string GwlbData::text() const
  */
 GeneveHandler::GeneveHandler(const GwlbtunConfig& cfg, const HookScripts &hookScriptsParam)
         : onlyInstance(cfg),
+          ebpfLoader(cfg.ebpfObject.empty() ? nullptr : std::make_unique<EbpfLoader>(cfg)),
           lifecycle(std::make_shared<EndpointLifecycle>()),
           hookScripts(hookScriptsParam),
           config(cfg),
@@ -100,6 +101,8 @@ std::string GeneveHandlerHealthCheck::output_str() const
     std::string ret = udp.output_str();
     for(const auto &eni : enis)
         ret += eni.output_str();
+    if(ebpf)
+        ret += ebpf->output_str();
     return ret;
 }
 
@@ -116,7 +119,7 @@ json GeneveHandlerHealthCheck::output_json() const
         enisJson.push_back(eni.output_json());
     }
 
-    return {
+    json j = {
         {"summary", {
             {"totalPktsIn", udp.totalPacketsIn()},
             {"totalBytesIn", udp.totalOctetsIn()},
@@ -128,6 +131,9 @@ json GeneveHandlerHealthCheck::output_json() const
         {"udp", udp.output_json()},
         {"enis", std::move(enisJson)}
     };
+    if(ebpf)
+        j["ebpf"] = ebpf->output_json();
+    return j;
 }
 
 GeneveHandlerHealthCheck GeneveHandler::check() const
@@ -142,7 +148,7 @@ GeneveHandlerHealthCheck GeneveHandler::check() const
     // Healthy: every UDP receiver thread, and every endpoint's tunnel threads, still running.
     const bool healthy = udpRcvr.healthCheck() &&
                          std::all_of(enis.begin(), enis.end(), [](const auto &e) { return e.healthy; });
-    return { healthy, udpRcvr.status(), std::move(enis) };
+    return { healthy, udpRcvr.status(), std::move(enis), ebpfLoader ? std::optional<EbpfHealthCheck>(ebpfLoader->check()) : std::nullopt };
 }
 
 void GeneveHandler::sweep()
@@ -234,7 +240,7 @@ void GeneveHandler::EndpointDeleter::operator()(GeneveHandlerENI *e) const noexc
 
 std::shared_ptr<GeneveHandlerENI> GeneveHandler::makeEndpoint(gwlbeid_t id)
 {
-    return std::shared_ptr<GeneveHandlerENI>(new GeneveHandlerENI(id, config, hookScripts), EndpointDeleter{lifecycle, id});
+    return std::shared_ptr<GeneveHandlerENI>(new GeneveHandlerENI(id, config, hookScripts, ebpfLoader.get()), EndpointDeleter{lifecycle, id});
 }
 
 /**
@@ -393,9 +399,25 @@ void GeneveHandler::udpReceiverCallback(unsigned char *pkt, ssize_t pktlen, stru
 
 
 /**
+ * Flow-cache reserve for one address family (first: 0 for IPv4, 3 for IPv6). Receive-only builds keep flows only
+ * for the eBPF maps, so without -e their caches aren't pre-sized.
+ */
+static std::array<std::size_t, 3> cacheReserve(const GwlbtunConfig &cfg, gwlbeid_t eni, size_t first, const EbpfLoader *ebpf)
+{
+#ifdef NO_RETURN_TRAFFIC
+    if(!ebpf)
+        return { 0, 0, 0 };
+#else
+    (void)ebpf;
+#endif
+    const auto &r = cfg.reserveFor(eni);
+    return { r[first], r[first + 1], r[first + 2] };
+}
+
+/**
  * Build everything for one GWLB endpoint (see the member list in GeneveHandler.h for the order).
  */
-GeneveHandlerENI::GeneveHandlerENI(gwlbeid_t eni, const GwlbtunConfig &cfg, const HookScripts &hookScripts) :
+GeneveHandlerENI::GeneveHandlerENI(gwlbeid_t eni, const GwlbtunConfig &cfg, const HookScripts &hookScripts, EbpfLoader *ebpfParam) :
         eni(eni), eniStr(MakeGwlbeStr(eni)),
         devInName(devname_make(eni, true)),
 #ifndef NO_RETURN_TRAFFIC
@@ -403,13 +425,10 @@ GeneveHandlerENI::GeneveHandlerENI(gwlbeid_t eni, const GwlbtunConfig &cfg, cons
 #else
         devOutName("none"s),
 #endif
+        ebpf(ebpfParam), tunnelTimeout(cfg.tunnelTimeout),
         hotSlots(cfg.udpThreadCount() + 1), hot(new HotCounters[hotSlots]),
-#ifndef NO_RETURN_TRAFFIC
-        v4Flows("IPv4", "GWLBe vpce-" + eniStr, cfg.tcpCacheTimeout, cfg.udpCacheTimeout, cfg.otherCacheTimeout,
-                { cfg.reserveFor(eni)[0], cfg.reserveFor(eni)[1], cfg.reserveFor(eni)[2] }),
-        v6Flows("IPv6", "GWLBe vpce-" + eniStr, cfg.tcpCacheTimeout, cfg.udpCacheTimeout, cfg.otherCacheTimeout,
-                { cfg.reserveFor(eni)[3], cfg.reserveFor(eni)[4], cfg.reserveFor(eni)[5] }),
-#endif
+        v4Flows("IPv4", "GWLBe vpce-" + eniStr, cfg.tcpCacheTimeout, cfg.udpCacheTimeout, cfg.otherCacheTimeout, cacheReserve(cfg, eni, 0, ebpfParam)),
+        v6Flows("IPv6", "GWLBe vpce-" + eniStr, cfg.tcpCacheTimeout, cfg.udpCacheTimeout, cfg.otherCacheTimeout, cacheReserve(cfg, eni, 3, ebpfParam)),
         gwiWriters(makeWriters(devInName, eniStr, gwiWriterCount(cfg.udpThreadCount(), cfg.maxRxQueues, cfg.tunThreads.cfg.size()))),
 #ifndef NO_RETURN_TRAFFIC
         sendingSock(openRawSendSocket()),
@@ -418,8 +437,290 @@ GeneveHandlerENI::GeneveHandlerENI(gwlbeid_t eni, const GwlbtunConfig &cfg, cons
 #ifndef NO_RETURN_TRAFFIC
         tunnelOut(devOutName, GWLB_MTU, cfg.tunThreads, [this](unsigned char *pkt, ssize_t len) { tunReceiverCallback(pkt, len); }, true),
 #endif
+        ebpfAttachment(*this),
         hooks(hookScripts, devInName, devOutName, eni)
 {
+}
+
+// ---- eBPF datapath (-e) -------------------------------------------------------------------------------------
+//
+// Each flow this endpoint learns from GWLB is also handed to the eBPF maps (ebpfLearn), so its later packets
+// skip gwlbtun: an ingress entry (keyed by endpoint and flow cookie, holding the inner flow's digest) and two
+// egress entries (the inner 5-tuple both ways, on this endpoint's gwo-). The flow cache stays the record of
+// what's in the maps: each entry's tag says what it put there, entries leave the maps when they leave the cache
+// (ebpfForget, from the sweep's eviction, a changed GENEVE header, or endpoint teardown), and the sweep keeps
+// accelerated flows (whose packets the cache no longer sees) alive from the maps' timestamps (ebpfActivity).
+
+namespace {
+constexpr uint8_t TAG_INGRESS = 1;   // the ingress map holds this flow's cookie, for this flow
+constexpr uint8_t TAG_EGRESS = 2;    // the egress maps hold this flow
+// A packet for a flow that's already in the ingress map can still reach userspace for a moment after it was
+// learned (it was queued before the entry went in). Later than this, the in-kernel entry is missing or not
+// working: count it, and learn the flow again.
+constexpr uint32_t REPUNT_LATE_SECS = 5;
+// How often to try again for a flow that isn't (fully) in the maps, for example because a map was full or
+// another flow holds its cookie.
+constexpr uint32_t RELEARN_SECS = 30;
+
+// Whether the eBPF programs can key this inner packet the way the flow cache does (see inner_flow_digest in
+// EbpfHelpers.c): not a later fragment of a TCP or UDP packet, not IPv6 with extension headers.
+bool ebpfKeyable(const unsigned char *ip, ssize_t len)
+{
+    if(len < 20)
+        return false;
+    const unsigned version = ip[0] >> 4;
+    if(version == 4)
+    {
+        const uint8_t prot = ip[9];
+        return !((prot == IPPROTO_TCP || prot == IPPROTO_UDP) && (be16toh_unaligned(ip + 6) & 0x1FFF));
+    }
+    if(version == 6 && len >= 40)
+    {
+        const uint8_t next = ip[6];
+        return next != 0 && next != 43 && next != 44 && next != 60 && next != 51;
+    }
+    return false;
+}
+
+EbpfIngressKey ingressKey(gwlbeid_t eni, const GwlbData &gd)
+{
+    EbpfIngressKey k{};
+    k.gwlbeId = eni;
+    k.flowCookie = GenevePacket(gd.header.data(), (ssize_t)gd.header.size()).flowCookie;
+    return k;
+}
+
+// The coarseTime() of a map timestamp (EbpfLoader::nowNs() clock), 0 for none.
+uint32_t coarseFromNs(uint64_t ns)
+{
+    if(ns == 0)
+        return 0;
+    const uint64_t now = EbpfLoader::nowNs();
+    const uint64_t age = now > ns ? (now - ns) / 1000000000ULL : 0;
+    const uint32_t c = coarseTime();
+    return age >= c ? 0 : c - (uint32_t)age;
+}
+} // namespace
+
+struct GeneveHandlerENI::EbpfFlow {
+    uint64_t digest;
+    bool v6;
+    EbpfEgressKeyV4 fwd4, rev4;
+    EbpfEgressKeyV6 fwd6, rev6;
+};
+
+GeneveHandlerENI::EbpfFlow GeneveHandlerENI::ebpfFlowOf(const PacketHeaderV4 &ph) const
+{
+    EbpfFlow f{};
+    const uint32_t src = htonl(ph.srcAddr()), dst = htonl(ph.dstAddr());
+    const uint16_t sp = htons(ph.srcPort()), dp = htons(ph.dstPort());
+    f.digest = gwlbtun_flow_digest(4, ph.prot, gwlbtun_flow_end(src, sp), gwlbtun_flow_end(dst, dp));
+    f.fwd4.gwoIfindex = f.rev4.gwoIfindex = ebpfAttachment.gwoIfindex;
+    f.fwd4.prot = f.rev4.prot = ph.prot;
+    f.fwd4.src = f.rev4.dst = src;
+    f.fwd4.dst = f.rev4.src = dst;
+    f.fwd4.srcPort = f.rev4.dstPort = sp;
+    f.fwd4.dstPort = f.rev4.srcPort = dp;
+    return f;
+}
+
+GeneveHandlerENI::EbpfFlow GeneveHandlerENI::ebpfFlowOf(const PacketHeaderV6 &ph) const
+{
+    EbpfFlow f{};
+    f.v6 = true;
+    uint32_t src[4], dst[4];
+    memcpy(src, &ph.srcAddr(), sizeof(src));
+    memcpy(dst, &ph.dstAddr(), sizeof(dst));
+    const uint16_t sp = htons(ph.srcPort()), dp = htons(ph.dstPort());
+    f.digest = gwlbtun_flow_digest(6, ph.prot, gwlbtun_flow_end(gwlbtun_fold_v6(src), sp), gwlbtun_flow_end(gwlbtun_fold_v6(dst), dp));
+    f.fwd6.gwoIfindex = f.rev6.gwoIfindex = ebpfAttachment.gwoIfindex;
+    f.fwd6.prot = f.rev6.prot = ph.prot;
+    memcpy(f.fwd6.src, src, sizeof(src)); memcpy(f.rev6.dst, src, sizeof(src));
+    memcpy(f.fwd6.dst, dst, sizeof(dst)); memcpy(f.rev6.src, dst, sizeof(dst));
+    f.fwd6.srcPort = f.rev6.dstPort = sp;
+    f.fwd6.dstPort = f.rev6.srcPort = dp;
+    return f;
+}
+
+/**
+ * Insert a flow into the cache (as udpReceiverCallback does without eBPF), and decide what the eBPF maps need:
+ *  - a new flow, or one whose GENEVE header or outer addresses changed (for example a new cookie after GWLB's
+ *    idle timeout): learn it (after removing the old entries);
+ *  - a packet of a flow already in the ingress map: normally the tail of packets queued before it was learned;
+ *    REPUNT_LATE_SECS or more after, count it as late and learn the flow again;
+ *  - a flow that isn't (fully) in the maps: try again every RELEARN_SECS.
+ */
+template<class PH> void GeneveHandlerENI::ebpfInsert(ProtocolFlowCache<PH, GwlbData> &cache, const PH &ph, const GwlbData &gd,
+                                                      const unsigned char *inner, ssize_t innerLen)
+{
+    std::optional<GwlbData> previous;
+    const FlowInsertResult r = cache.insert(ph, gd, &previous);
+    if(r.kind == FlowInsertResult::Refreshed)
+    {
+        if(r.tag & TAG_INGRESS)
+        {
+            ebpfRepunts.fetch_add(1, std::memory_order_relaxed);
+            if(r.tagAge < REPUNT_LATE_SECS)
+                return;
+            ebpfLateRepunts.fetch_add(1, std::memory_order_relaxed);
+        }
+        else if(r.tagAge < RELEARN_SECS)
+            return;
+    }
+    else if(r.kind == FlowInsertResult::Changed && previous)
+        ebpfForget(ph, *previous, TAG_INGRESS | TAG_EGRESS);
+    if(!ebpfKeyable(inner, innerLen))
+        return;   // the programs can't match this packet's flow; it stays in userspace
+    cache.setTag(ph, ebpfLearn(ph, gd));
+}
+
+/**
+ * Add a flow to the eBPF maps. Returns what was added (TAG_*). Only flows in GWLB's standard GENEVE layout,
+ * arriving on an interface the ingress program is on, go in the ingress map; only those arriving on the egress
+ * action's interface go in the egress maps (replies to others must leave by their own interface).
+ */
+template<class PH> uint8_t GeneveHandlerENI::ebpfLearn(const PH &ph, const GwlbData &gd)
+{
+    if(gd.header.size() != GWLB_GENEVE_LEN)
+        return 0;
+    const EbpfFlow f = ebpfFlowOf(ph);
+    uint8_t tag = 0;
+#ifndef NO_RETURN_TRAFFIC
+    // Egress first, so return traffic for the first packets the kernel delivers is already handled there too.
+    if(ebpfAttachment.egress && (uint32_t)gd.ifindex == ebpf->mirredIfindex())
+    {
+        // The same outer headers sendUdpSG() builds: from the address the flow arrived at, to GWLB, with GWLB's
+        // ports swapped back, Don't Fragment and ID 0, TTL 2, no UDP checksum. The program fills in the lengths
+        // and the IP checksum.
+        EbpfEgressValue v{};
+        unsigned char *p = v.encap;
+        p[0] = 0x45;
+        p[6] = 0x40;   // DF
+        p[8] = 2;      // TTL
+        p[9] = IPPROTO_UDP;
+        memcpy(p + 12, &gd.dstAddr.s_addr, 4);
+        memcpy(p + 16, &gd.srcAddr.s_addr, 4);
+        const uint16_t sport = htons(gd.srcPort), dport = htons(gd.dstPort);
+        memcpy(p + 20, &sport, 2);
+        memcpy(p + 22, &dport, 2);
+        memcpy(p + 28, gd.header.data(), GWLB_GENEVE_LEN);
+        v.encapLen = GWLB_ENCAP_LEN;
+        v.nicIfindex = (uint32_t)gd.ifindex;
+        v.lastSentNs = EbpfLoader::nowNs();
+        const bool ok = f.v6 ? ebpf->updateEgress(f.fwd6, v) && ebpf->updateEgress(f.rev6, v)
+                             : ebpf->updateEgress(f.fwd4, v) && ebpf->updateEgress(f.rev4, v);
+        if(ok)
+            tag |= TAG_EGRESS;
+        else if(f.v6) { ebpf->removeEgress(f.fwd6); ebpf->removeEgress(f.rev6); }
+        else { ebpf->removeEgress(f.fwd4); ebpf->removeEgress(f.rev4); }
+    }
+#endif
+    if(ebpfAttachment.gwiIfindex && ebpf->handlesIngress(gd.ifindex))
+    {
+        const EbpfIngressKey k = ingressKey(eni, gd);
+        EbpfIngressValue v{};
+        v.flowDigest = f.digest;
+        v.lastSeenNs = EbpfLoader::nowNs();
+        v.gwiIfindex = ebpfAttachment.gwiIfindex;
+        v.disposition = DISP_REDIRECT;
+        switch(ebpf->insertIngress(k, v))
+        {
+            case EbpfLoader::InsertResult::Inserted:
+                tag |= TAG_INGRESS;
+                break;
+            case EbpfLoader::InsertResult::Exists:
+            {
+                // Already there: ours (learned again), or another flow's that GWLB gave the same cookie, which
+                // keeps it (this flow then stays in userspace on the way in).
+                EbpfIngressValue cur;
+                if(ebpf->lookupIngress(k, cur) && cur.flowDigest == f.digest && cur.gwiIfindex == v.gwiIfindex)
+                    tag |= TAG_INGRESS;
+                break;
+            }
+            default:
+                break;
+        }
+    }
+    return tag;
+}
+
+// Remove what a flow put in the eBPF maps (tag says what it may have). The ingress entry goes only if it's still
+// this flow's: another flow may have taken the cookie since.
+template<class PH> void GeneveHandlerENI::ebpfForget(const PH &ph, const GwlbData &gd, uint8_t tag)
+{
+    const EbpfFlow f = ebpfFlowOf(ph);
+#ifndef NO_RETURN_TRAFFIC
+    if((tag & TAG_EGRESS) && ebpfAttachment.gwoIfindex)
+    {
+        if(f.v6) { ebpf->removeEgress(f.fwd6); ebpf->removeEgress(f.rev6); }
+        else { ebpf->removeEgress(f.fwd4); ebpf->removeEgress(f.rev4); }
+    }
+#endif
+    if((tag & TAG_INGRESS) && gd.header.size() == GWLB_GENEVE_LEN)
+    {
+        const EbpfIngressKey k = ingressKey(eni, gd);
+        EbpfIngressValue cur;
+        if(ebpf->lookupIngress(k, cur) && cur.flowDigest == f.digest && cur.gwiIfindex == ebpfAttachment.gwiIfindex)
+            ebpf->removeIngress(k);
+    }
+}
+
+// When the eBPF datapath last carried a packet of this flow (coarseTime()), 0 if never.
+template<class PH> uint32_t GeneveHandlerENI::ebpfActivity(const PH &ph, const GwlbData &gd, uint8_t tag) const
+{
+    const EbpfFlow f = ebpfFlowOf(ph);
+    uint64_t ns = 0;
+    if((tag & TAG_INGRESS) && gd.header.size() == GWLB_GENEVE_LEN)
+    {
+        EbpfIngressValue v;
+        if(ebpf->lookupIngress(ingressKey(eni, gd), v) && v.flowDigest == f.digest)
+            ns = std::max<uint64_t>(ns, v.lastSeenNs);
+    }
+#ifndef NO_RETURN_TRAFFIC
+    if(tag & TAG_EGRESS)
+    {
+        EbpfEgressValue v;
+        if(f.v6 ? ebpf->lookupEgress(f.fwd6, v) : ebpf->lookupEgress(f.fwd4, v))
+            ns = std::max<uint64_t>(ns, v.lastSentNs);
+        if(f.v6 ? ebpf->lookupEgress(f.rev6, v) : ebpf->lookupEgress(f.rev4, v))
+            ns = std::max<uint64_t>(ns, v.lastSentNs);
+    }
+#endif
+    return coarseFromNs(ns);
+}
+
+GeneveHandlerENI::EbpfAttachment::EbpfAttachment(GeneveHandlerENI &ownerParam) : owner(ownerParam)
+{
+    if(!owner.ebpf)
+        return;
+    gwiIfindex = EbpfLoader::ifindex(owner.devInName);
+    if(gwiIfindex == 0)
+        LOG(LS_EBPF, LL_IMPORTANT, "Unable to find "s + owner.devInName + "; GWLB endpoint vpce-"s + owner.eniStr + "'s traffic stays in userspace."s);
+#ifndef NO_RETURN_TRAFFIC
+    gwoIfindex = EbpfLoader::ifindex(owner.devOutName);
+    egress = gwoIfindex != 0 && owner.ebpf->egressEnabled() && owner.ebpf->attachEgress(owner.devOutName);
+#endif
+}
+
+GeneveHandlerENI::EbpfAttachment::~EbpfAttachment()
+{
+    if(!owner.ebpf)
+        return;
+    size_t n = 0;
+    auto forget = [&](const auto &ph, const GwlbData &gd, uint8_t tag) {
+        if(tag)
+        {
+            owner.ebpfForget(ph, gd, tag);
+            n++;
+        }
+    };
+    try {
+        owner.v4Flows.forEach(forget);
+        owner.v6Flows.forEach(forget);
+        LOG(LS_EBPF, LL_INFO, "Removed GWLB endpoint vpce-"s + owner.eniStr + "'s "s + std::to_string(n) + " flows from the eBPF maps."s);
+    } catch(...) {
+        // Only possible if building the log message runs out of memory.
+    }
 }
 
 /**
@@ -544,19 +845,29 @@ void GeneveHandlerENI::udpReceiverCallback(const GwlbData &gd, const unsigned ch
         return;
     }
     const unsigned version = inner[0] >> 4;
-#ifndef NO_RETURN_TRAFFIC
-    try {
-        // Insert the flow if new, otherwise just refresh its idle timer.
-        if(__builtin_expect(version == 4, 1))
-            v4Flows.insert(PacketHeaderV4(inner, innerLen), gd);
-        else if(version == 6)
-            v6Flows.insert(PacketHeaderV6(inner, innerLen), gd);
-    } catch(const std::invalid_argument &err) {
-        countDrop();
-        LOG(LS_UDP, LL_DEBUG, "Packet processor has a malformed packet: "s + err.what());
-        return;
-    }
+#ifdef NO_RETURN_TRAFFIC
+    if(ebpf)   // receive-only builds keep flows only for the eBPF maps
 #endif
+    {
+        try {
+            // Insert the flow if new, otherwise just refresh its idle timer. With eBPF, also hand new flows to the
+            // eBPF maps (see ebpfInsert).
+            if(__builtin_expect(version == 4, 1))
+            {
+                const PacketHeaderV4 ph(inner, innerLen);
+                if(ebpf) ebpfInsert(v4Flows, ph, gd, inner, innerLen); else v4Flows.insert(ph, gd);
+            }
+            else if(version == 6)
+            {
+                const PacketHeaderV6 ph(inner, innerLen);
+                if(ebpf) ebpfInsert(v6Flows, ph, gd, inner, innerLen); else v6Flows.insert(ph, gd);
+            }
+        } catch(const std::invalid_argument &err) {
+            countDrop();
+            LOG(LS_UDP, LL_DEBUG, "Packet processor has a malformed packet: "s + err.what());
+            return;
+        }
+    }
     if(__builtin_expect(version != 4 && version != 6, 0))
     {
         countDrop();
@@ -622,6 +933,9 @@ std::string GeneveHandlerENIHealthCheck::output_str() const
     for(const auto &c : v6Caches)
         ret << c.output_str();
 #endif
+    if(ebpf)
+        ret << "eBPF: " << ebpfRepunts << " packets of flows already in the eBPF maps reached gwlbtun, " << ebpfLateRepunts
+            << " of them 5 or more seconds after the flow was learned.\n";
     return ret.str();
 }
 
@@ -637,6 +951,8 @@ json GeneveHandlerENIHealthCheck::output_json() const
         j[v6CacheKeys[i]] = v6Caches[i].output_json();
     }
 #endif
+    if(ebpf)
+        j["ebpf"] = {{"repunts", ebpfRepunts}, {"lateRepunts", ebpfLateRepunts}};
     return j;
 }
 
@@ -654,15 +970,30 @@ GeneveHandlerENIHealthCheck GeneveHandlerENI::check() const
         pktsOut += hot[i].pktsOut.load(); bytesOut += hot[i].bytesOut.load(); pktsDropped += hot[i].pktsDropped.load();
         lastOut = std::max(lastOut, hot[i].lastPacketOut.load());
     }
-    return { healthy, eniStr, pktsOut, bytesOut, pktsDropped, lastOut, tunnelIn.status()
+    GeneveHandlerENIHealthCheck h{ healthy, eniStr, pktsOut, bytesOut, pktsDropped, lastOut, tunnelIn.status()
 #ifndef NO_RETURN_TRAFFIC
              , tunnelOut.status(), v4Flows.stats(), v6Flows.stats()
 #endif
     };
+    h.ebpf = ebpf != nullptr;
+    h.ebpfRepunts = ebpfRepunts.load(std::memory_order_relaxed);
+    h.ebpfLateRepunts = ebpfLateRepunts.load(std::memory_order_relaxed);
+    return h;
 }
 
 void GeneveHandlerENI::sweepCaches()
 {
+    if(ebpf)
+    {
+        // Ask the maps about accelerated flows the cache hasn't seen for a while (soon enough, with -t, for the
+        // idle check below), keep them while the maps saw them, and take evicted flows out of the maps.
+        const uint32_t checkAge = tunnelTimeout > 0 ? (uint32_t)tunnelTimeout : UINT32_MAX;
+        auto activity = [this](const auto &ph, const GwlbData &gd, uint8_t tag) { return ebpfActivity(ph, gd, tag); };
+        auto evict = [this](const auto &ph, const GwlbData &gd, uint8_t tag) { ebpfForget(ph, gd, tag); };
+        lastFlowActivity.store(std::max(v4Flows.sweep(checkAge, activity, evict), v6Flows.sweep(checkAge, activity, evict)),
+                               std::memory_order_relaxed);
+        return;
+    }
 #ifndef NO_RETURN_TRAFFIC
     v4Flows.sweep();
     v6Flows.sweep();
@@ -684,6 +1015,11 @@ bool GeneveHandlerENI::hasGoneIdle(int timeout) const
     if(tunnelIn.lastPacketTime() > expireTime) return false;
     if(tunnelOut.lastPacketTime() > expireTime) return false;
 #endif
+    // Packets the eBPF datapath carries never reach the counters above; the last sweep recorded when it last
+    // carried any of this endpoint's flows.
+    if(ebpf)
+        if(const uint32_t last = lastFlowActivity.load(std::memory_order_relaxed); last != 0 && coarseTime() - last < (uint32_t)timeout)
+            return false;
     return true;
 }
 

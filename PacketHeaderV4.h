@@ -27,6 +27,12 @@ public:
 
     uint8_t   prot;    // Inner IP protocol number (picks the flow cache)
 
+    // The flow's fields, host byte order (for the eBPF maps).
+    uint32_t srcAddr() const { return src; }
+    uint32_t dstAddr() const { return dst; }
+    uint16_t srcPort() const { return srcpt; }
+    uint16_t dstPort() const { return dstpt; }
+
 private:
     uint32_t  src;
     uint32_t  dst;

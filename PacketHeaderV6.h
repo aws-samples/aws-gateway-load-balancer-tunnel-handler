@@ -30,6 +30,12 @@ public:
 
     uint8_t   prot;    // Inner IP protocol number (after any extension headers; picks the flow cache)
 
+    // The flow's fields (for the eBPF maps): addresses as on the wire, ports in host byte order.
+    const struct in6_addr &srcAddr() const { return src; }
+    const struct in6_addr &dstAddr() const { return dst; }
+    uint16_t srcPort() const { return srcpt; }
+    uint16_t dstPort() const { return dstpt; }
+
 private:
     struct in6_addr src;
     struct in6_addr dst;

@@ -9,6 +9,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -23,6 +24,7 @@
 #include "GwlbtunConfig.h"
 #include "HealthCheck.h"
 #include "HookScripts.h"
+#include "EbpfLoader.h"
 
 constexpr uint16_t GENEVE_PORT = 6081;   // UDP port number that GENEVE uses by standard
 
@@ -61,6 +63,11 @@ struct GeneveHandlerENIHealthCheck {
     std::array<FlowCacheHealthCheck, 3> v4Caches;   // TCP, UDP, Other
     std::array<FlowCacheHealthCheck, 3> v6Caches;
 #endif
+    // With eBPF (-e): packets of flows this endpoint had already handed to the eBPF maps that still reached
+    // gwlbtun, and of those, how many arrived 5 seconds or more after the flow was learned (see
+    // GeneveHandlerENI::ebpfInsert).
+    bool ebpf = false;
+    uint64_t ebpfRepunts = 0, ebpfLateRepunts = 0;
 
     std::string output_str() const;
     json output_json() const;
@@ -75,8 +82,9 @@ struct GeneveHandlerENIHealthCheck {
 class GeneveHandlerENI {
 public:
     // cfg and hookScripts are only read during construction (the handler keeps neither): GeneveHandler's copy
-    // of the configuration is destroyed before its endpoints are.
-    GeneveHandlerENI(gwlbeid_t eni, const GwlbtunConfig &cfg, const HookScripts &hookScripts);
+    // of the configuration is destroyed before its endpoints are. ebpf is the eBPF datapath (null without -e),
+    // which outlives every endpoint.
+    GeneveHandlerENI(gwlbeid_t eni, const GwlbtunConfig &cfg, const HookScripts &hookScripts, EbpfLoader *ebpf);
     GeneveHandlerENI(const GeneveHandlerENI &) = delete;
     GeneveHandlerENI &operator=(const GeneveHandlerENI &) = delete;
     // A decapsulated packet from GWLB (pkt is the whole GENEVE payload; gd describes its header).
@@ -103,6 +111,9 @@ private:
     //     them (tunReceiverCallback), so they must exist before those threads start and outlive them.
     //   - gwiWriters creates gwi-; tunnelIn then attaches its reader queues to it.
     //   - tunnelOut creates gwo-.
+    //   - ebpfAttachment comes after both interfaces exist and before hooks, so CREATE runs with the eBPF
+    //     egress program already on gwo- (a hook may add its own tc filters there), and on teardown this
+    //     endpoint's flows leave the eBPF maps after DESTROY and before the interfaces go.
     //   - hooks is LAST: CREATE runs once both interfaces exist, DESTROY runs first on teardown, while
     //     both still exist and before any thread stops, and neither runs if construction failed.
     const gwlbeid_t eni;
@@ -110,6 +121,9 @@ private:
 
     const std::string devInName;
     const std::string devOutName;
+
+    EbpfLoader *const ebpf;         // null without -e
+    const int tunnelTimeout;        // -t, for the eBPF-aware cache sweep
 
     // Hot per-packet counters on their own cache line, so these writes don't
     // invalidate lines holding read-mostly fields touched on every packet
@@ -129,10 +143,22 @@ private:
     void writeToTun(const unsigned char *pkt, ssize_t pktlen) __attribute__((hot));
     void countDrop() { hotSlot().pktsDropped.fetch_add(1, std::memory_order_relaxed); }
 
-#ifndef NO_RETURN_TRAFFIC
+    // The flows seen from GWLB. Receive-only (NO_RETURN_TRAFFIC) builds use them only with -e, to track what
+    // the eBPF maps hold.
     ProtocolFlowCache<PacketHeaderV4, GwlbData> v4Flows;
     ProtocolFlowCache<PacketHeaderV6, GwlbData> v6Flows;
-#endif
+
+    // eBPF bookkeeping (-e). See udpReceiverCallback and the ebpf* functions in GeneveHandler.cpp.
+    std::atomic<uint64_t> ebpfRepunts{0}, ebpfLateRepunts{0};
+    std::atomic<uint32_t> lastFlowActivity{0};   // newest activity of any flow at the last sweep (coarseTime())
+    struct EbpfFlow;
+    EbpfFlow ebpfFlowOf(const PacketHeaderV4 &ph) const;
+    EbpfFlow ebpfFlowOf(const PacketHeaderV6 &ph) const;
+    template<class PH> void ebpfInsert(ProtocolFlowCache<PH, GwlbData> &cache, const PH &ph, const GwlbData &gd,
+                                       const unsigned char *inner, ssize_t innerLen);
+    template<class PH> uint8_t ebpfLearn(const PH &ph, const GwlbData &gd);
+    template<class PH> void ebpfForget(const PH &ph, const GwlbData &gd, uint8_t tag);
+    template<class PH> uint32_t ebpfActivity(const PH &ph, const GwlbData &gd, uint8_t tag) const;
 
     // Sockets to write to our associated tunnel (gwi-); the first creates the device. See GWI_WRITER_SHARE
     // in utils.h and makeWriters().
@@ -149,14 +175,27 @@ private:
     TunInterface tunnelOut;   // creates gwo-
 #endif
 
+    // With -e: resolves the interfaces for the eBPF maps and attaches the egress program to gwo-; destroying it
+    // removes this endpoint's flows from the eBPF maps (so none point at its interfaces once they're gone).
+    struct EbpfAttachment {
+        explicit EbpfAttachment(GeneveHandlerENI &owner);
+        ~EbpfAttachment();
+        EbpfAttachment(const EbpfAttachment &) = delete;
+        EbpfAttachment &operator=(const EbpfAttachment &) = delete;
+        GeneveHandlerENI &owner;
+        uint32_t gwiIfindex = 0, gwoIfindex = 0;
+        bool egress = false;   // the egress program is on gwo-
+    } ebpfAttachment;
+
     HookScripts::Endpoint hooks;   // LAST
 };
 
 // A snapshot of the whole GeneveHandler, for the health check.
 class GeneveHandlerHealthCheck {
 public:
-    GeneveHandlerHealthCheck(bool healthy, UDPPacketReceiverHealthCheck udp, std::vector<GeneveHandlerENIHealthCheck> enis) :
-        healthy(healthy), udp(std::move(udp)), enis(std::move(enis)) {}
+    GeneveHandlerHealthCheck(bool healthy, UDPPacketReceiverHealthCheck udp, std::vector<GeneveHandlerENIHealthCheck> enis,
+                             std::optional<EbpfHealthCheck> ebpf) :
+        healthy(healthy), udp(std::move(udp)), enis(std::move(enis)), ebpf(std::move(ebpf)) {}
     std::string output_str() const;
     json output_json() const;
     bool isHealthy() const { return healthy; }
@@ -165,6 +204,7 @@ private:
     bool healthy;
     UDPPacketReceiverHealthCheck udp;
     std::vector<GeneveHandlerENIHealthCheck> enis;
+    std::optional<EbpfHealthCheck> ebpf;   // with -e
 };
 
 class GeneveHandler {
@@ -180,6 +220,11 @@ class GeneveHandler {
         OnlyInstance &operator=(const OnlyInstance &) = delete;
         static std::atomic<bool> exists;
     } onlyInstance;
+
+    // The eBPF datapath (-e), or null. Loaded and attached before anything else starts (packets of flows it
+    // doesn't know carry on to the UDP threads), and declared before everything that holds endpoints, so it
+    // outlives them: destroying an endpoint removes its flows from the maps.
+    const std::unique_ptr<EbpfLoader> ebpfLoader;
 
 public:
     // Starts the UDP receiver threads; endpoints are then built as their traffic arrives. hookScripts must
