@@ -26,6 +26,9 @@ class Build:
         self.path = os.path.abspath(path)
         # NO_RETURN_TRAFFIC builds have no tunnel threads (and no flow cache or gwo- device).
         self.return_traffic = self.run("--tunthreads", "1", "--show-config").returncode == 0
+        # The eBPF datapath object built with it (next to the binary), if this build has eBPF support.
+        obj = os.path.join(os.path.dirname(self.path), "gwlbtun-ebpf.o")
+        self.ebpf_object = obj if os.path.exists(obj) and "built without eBPF support" not in self.run("-h").out else None
 
     def run(self, *args, timeout=10, wrapper=()):
         """Run to completion (configuration, help); stdout and stderr together in .out."""

@@ -183,3 +183,31 @@ def test_help(build):
 
 def test_show_config_reserve_default(build):
     assert "# reserve: (default) 16384,16384,1024,1024,1024,1024" in build.show_config()
+
+
+# --- eBPF options (-e, --ebpf-reserve) -----------------------------------------------------------------
+
+def test_ebpf_reserve_default_follows_reserve(build):
+    assert "# ebpf-reserve: (default, from reserve) 33792,3072" in build.show_config()
+    assert "# ebpf-reserve: (default, from reserve) 6,15" in build.show_config("--reserve", "1,2,3,4,5,6")
+
+
+def test_ebpf_reserve_round_trip(build, tmp_path):
+    o = build.show_config("--ebpf-reserve", "1000000,20000")
+    assert 'ebpf-reserve: "1000000,20000"' in o
+    assert 'ebpf-reserve: "1000000,20000"' in build.show_config("-f", write(tmp_path, "e.yaml", without_banner(o)))
+
+
+@pytest.mark.parametrize("value", ["5", "1,2,3", "a,1", "1,-1", "100000001,1", "1, 2"])
+def test_ebpf_reserve_rejected(build, value):
+    assert "Invalid --ebpf-reserve" in build.run("--ebpf-reserve", value, "--show-config").out
+
+
+def test_ebpf_object(build, tmp_path):
+    if not build.ebpf_object:
+        o = build.run("-e", "/nonexistent", "--show-config").out
+        assert "built without eBPF support" in o and "eBPF options" in build.run("-h").out
+        return
+    assert "Invalid -e/--ebpf '/nonexistent'" in build.run("-e", "/nonexistent", "--show-config").out
+    assert 'ebpf: "%s"' % build.ebpf_object in build.show_config("-e", build.ebpf_object)
+    assert 'ebpf: "%s"' % build.ebpf_object in build.show_config("-f", write(tmp_path, "o.yaml", "ebpf: %s\n" % build.ebpf_object))

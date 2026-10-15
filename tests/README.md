@@ -46,6 +46,7 @@ The configuration tests (`test_config.py`) need no root, so they also run direct
 | `test_health.py` | the health check listener: slow and idle clients, caching, output formats, `-p` binding, failures |
 | `test_lifecycle.py` | hook scripts, shutdown, idle teardown (`-t`), setup failures, the one-instance guard, device names |
 | `test_host_layout.py` | UDP threads against the host's receive queues (`--host` only) |
+| `test_ebpf.py` | the eBPF datapath (`-e`): flows carried in the kernel both ways, what stays in userspace, cookie changes, full maps, restart after `kill -9`, idle teardown. Needs a build with eBPF support and Linux 6.6 or later; skipped otherwise |
 | `lib/geneve.py` | GENEVE/GWLB packet builder and sender |
 | `lib/gwlbtun.py` | the gwlbtun process under test, and a recording hook script |
 | `lib/netutil.py` | waiting, devices, sockets, dummy interfaces, a peer network namespace |
