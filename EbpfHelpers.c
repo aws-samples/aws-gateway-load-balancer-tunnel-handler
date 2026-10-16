@@ -433,4 +433,6 @@ int gwlbtun_egress(struct __sk_buff *skb)
     return TC_ACT_PIPE;
 }
 
-char _license[] SEC("license") = "GPL";
+// The kernel only restricts GPL-only helpers by licence; none of the helpers above are, so MIT-0 (the project's
+// licence) loads as is.
+char _license[] SEC("license") = "MIT-0";
