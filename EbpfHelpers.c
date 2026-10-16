@@ -17,8 +17,10 @@
  * exactly as userspace would is left to userspace.
  *
  * Why tc and not XDP: XDP can't deliver into another device's receive path (its bpf_redirect takes no flags and
- * only transmits), which is what handing a packet to gwi- needs, and ENA supports native XDP only below the
- * jumbo MTU GWLB traffic needs.
+ * only transmits; see bpf_redirect at docs.ebpf.io), which is what handing a packet to gwi- needs. Also, without multi-buffer support the ENA
+ * driver's native XDP allows an MTU of at most about 3,500 bytes (see "XDP Support" in the ENA Linux driver's
+ * README, github.com/amzn/amzn-drivers), well below the 8,500-byte MTU GWLB supports (see "Network maximum
+ * transmission unit (MTU)" in the Gateway Load Balancer user guide).
  *
  * Why the egress uses mirred and not bpf_redirect: gwo- is an L3 device, so its packets have no MAC header,
  * and bpf_redirect to an Ethernet device drops a packet whose MAC header offset isn't before its network
@@ -239,7 +241,8 @@ int gwlbtun_ingress(struct __sk_buff *skb)
     if((void *)(udp + 8) > end) { count_ingress(ING_NO_UDP_HDR); return GWLBTUN_TCX_NEXT; }
     if((((__u16)udp[2] << 8) | udp[3]) != GWLBTUN_GENEVE_PORT) { count_ingress(ING_WRONG_UDP_PORT); return GWLBTUN_TCX_NEXT; }
 
-    // GENEVE: version 0, VNI 0 (as GWLB always sends), and exactly GWLB's three options.
+    // GENEVE: version 0, VNI 0 and exactly GWLB's three options (the packet format in the AWS blog post "Integrate
+    // your custom logic or appliance with AWS Gateway Load Balancer"; see EbpfHelpers.h).
     __u8 *gen = udp + 8;
     if((void *)(gen + 8) > end) { count_ingress(ING_NO_GENEVE_HDR); return GWLBTUN_TCX_NEXT; }
     if((gen[0] >> 6) != 0) { count_ingress(ING_BAD_GENEVE_VER); return GWLBTUN_TCX_NEXT; }
@@ -269,8 +272,10 @@ int gwlbtun_ingress(struct __sk_buff *skb)
     if(!val) { count_ingress(ING_UNKNOWN_FLOW); return GWLBTUN_TCX_NEXT; }
     if(val->disposition != DISP_REDIRECT) { count_ingress(ING_UNKNOWN_FLOW); return GWLBTUN_TCX_NEXT; }
 
-    // The cookie was learned for one inner flow; only deliver that flow. Anything else (a cookie GWLB has
-    // given to another flow too, or a packet we can't key) goes to userspace, which handles it correctly.
+    // The cookie was learned for one inner flow; only deliver that flow. GWLB describes the cookie as random and
+    // unique per flow, the same in both directions (the AWS blog posts cited in EbpfHelpers.h); this guards
+    // against anything else, such as an entry left from an earlier flow. Anything that doesn't match, and packets
+    // we can't key, go to userspace, which handles them correctly.
     __u64 digest;
     if(inner_flow_digest(data + GWLB_RETURN_ETH_LEN + GWLB_ENCAP_LEN, end, &digest) < 0)
     {
@@ -381,8 +386,8 @@ int gwlbtun_egress(struct __sk_buff *skb)
     stamp(&val->lastSentNs);
     if(val->encapLen != GWLB_ENCAP_LEN) { count_egress(EGR_ENCAP_FAILED); return TC_ACT_OK; }
 
-    // mirred sends to one interface; a flow that arrived on another must leave by that one (source/destination
-    // checking drops it otherwise), which userspace does.
+    // mirred sends to one interface; a flow that arrived on another must leave by that one (we observed EC2's
+    // source/destination check dropping replies sent out of the wrong interface), which userspace does.
     __u32 zero = 0;
     struct EbpfEgressConfig *cfg = bpf_map_lookup_elem(&egress_config_map, &zero);
     if(!cfg || cfg->mirredIfindex != val->nicIfindex) { count_egress(EGR_OTHER_NIC); return TC_ACT_OK; }

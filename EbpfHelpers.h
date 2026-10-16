@@ -19,9 +19,12 @@
 #define GWLBTUN_INLINE static inline
 #endif
 
-// GWLB's GENEVE encapsulation is a fixed size: outer IPv4 (20, no options) + UDP (8) + GENEVE base (8) + the
-// three GWLB options (endpoint ID 12, attachment ID 12, flow cookie 8). The programs only handle packets with
-// exactly this layout; anything else is left to gwlbtun's userspace path.
+// The GENEVE encapsulation GWLB sends: outer IPv4 + UDP to port 6081 + GENEVE (version 0, VNI 0, options length
+// 8 words) with three class 0x0108 options: endpoint ID (12 bytes), attachment ID (12) and flow cookie (8). See
+// "What is the packet format that the GWLB and appliance exchange?" in the AWS blog post "Integrate your custom
+// logic or appliance with AWS Gateway Load Balancer"; the outer header is IPv4 for IPv6 payloads too ("New –
+// Gateway Load Balancer support for IPv6"). We have only observed outer IPv4 headers without options. The
+// programs only handle packets with exactly this layout; anything else is left to gwlbtun's userspace path.
 #define GWLB_GENEVE_LEN      40
 #define GWLB_ENCAP_LEN       (20 + 8 + GWLB_GENEVE_LEN)   // 68
 #define GWLB_RETURN_ETH_LEN  14
@@ -86,8 +89,9 @@ struct EbpfEgressKeyV6 {
 };
 
 // The outer headers for a flow's return traffic, as gwlbtun's userspace path would build them (sendUdpSG):
-// IPv4 from the address the flow arrived at to GWLB, UDP with the flow's ports, then its GENEVE header. The
-// program fills in the lengths and the IP checksum.
+// IPv4 from the address the flow arrived at to GWLB (addresses swapped), UDP with the flow's ports kept as they
+// were, then its GENEVE header unchanged; what the "Integrate your custom logic or appliance with AWS Gateway
+// Load Balancer" blog post asks of an appliance. The program fills in the lengths and the IP checksum.
 struct EbpfEgressValue {
     __u8  encap[GWLB_ENCAP_LEN];
     __u16 encapLen;       // always GWLB_ENCAP_LEN; checked by the program

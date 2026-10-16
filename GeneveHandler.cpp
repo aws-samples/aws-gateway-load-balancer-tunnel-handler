@@ -544,8 +544,8 @@ GeneveHandlerENI::EbpfFlow GeneveHandlerENI::ebpfFlowOf(const PacketHeaderV6 &ph
 
 /**
  * Insert a flow into the cache (as udpReceiverCallback does without eBPF), and decide what the eBPF maps need:
- *  - a new flow, or one whose GENEVE header or outer addresses changed (for example a new cookie after GWLB's
- *    idle timeout): learn it (after removing the old entries);
+ *  - a new flow, or one whose GENEVE header or outer addresses changed (for example a new cookie, which we've
+ *    observed when a flow returns after GWLB's idle timeout): learn it (after removing the old entries);
  *  - a packet of a flow already in the ingress map: normally the tail of packets queued before it was learned;
  *    REPUNT_LATE_SECS or more after, count it as late and learn the flow again;
  *  - a flow that isn't (fully) in the maps: try again every RELEARN_SECS.
