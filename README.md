@@ -204,10 +204,10 @@ Requirements:
 
 What stays in userspace:
 - Flows that don't fit in the maps. `--ebpf-reserve V4,V6` sets how many IPv4 and IPv6 flows they hold for all endpoints together (by default, one endpoint's `--reserve` totals); the health check counts flows that didn't fit.
-- Packets whose flow the programs can't key the way gwlbtun's flow cache does: later fragments of TCP or UDP packets, and IPv6 packets with extension headers. GENEVE packets with other than GWLB's usual three options, or with IP options or fragmentation in the outer header, also take the userspace path.
-- A second inner flow that arrives with a flow cookie already in use by another: only the flow the cookie was learned for is carried in the kernel.
+- Packets whose flow the programs can't key the way gwlbtun's flow cache does: later fragments of TCP or UDP packets, and IPv6 packets with extension headers. GENEVE packets with other than the three options GWLB sends (see the packet format in [Integrate your custom logic or appliance with AWS Gateway Load Balancer](https://aws.amazon.com/blogs/networking-and-content-delivery/integrate-your-custom-logic-or-appliance-with-aws-gateway-load-balancer/)), or with IP options or fragmentation in the outer header, also take the userspace path.
+- A second inner flow that arrives with a flow cookie already in use by another: only the flow the cookie was learned for is carried in the kernel. GWLB describes flow cookies as unique per flow (same blog post); the check guards against stale entries and anything unexpected.
 - Replies sent back through `gwi-` rather than `gwo-` (the egress program is only on `gwo-`).
-- With several `-I` interfaces, replies to flows that arrived on any but the first: the egress program sends to the first interface, and replies must leave by the interface their flow arrived on.
+- With several `-I` interfaces, replies to flows that arrived on any but the first: the egress program sends to the first interface, and replies must leave by the interface their flow arrived on (see [Limiting gwlbtun to specific interfaces](#limiting-gwlbtun-to-specific-interfaces)).
 
 Flows leave the maps when they leave gwlbtun's flow cache, using the same idle timeouts, and when their endpoint is torn down (`-t`). The ingress program is attached as a link owned by the gwlbtun process, so if gwlbtun exits for any reason, even `kill -9`, the kernel removes it and packets go to the network stack as without gwlbtun.
 
@@ -354,7 +354,7 @@ gwlbtun supports multithreading, and doing so is recommended on multicore system
 gwlbtun labels its threads with its name (gwlbtun), and either Uxxx for an unpinned UDP thread, where the number is simply an index, or UAxxx for a pinned one, with the number being the core that thread is pinned to. The tunnel threads are labeled the same, except with a T instead of a U.
 
 ## Tested performance numbers
-Since it's initial release, gwlbtun has had many improvements to its packet processing. v4.0 adds the optional eBPF datapath; its numbers will be added here once measured. Comparing some prior versions (2022.11 pre-Boost, 3.0, 3.2, and now 3.3):
+Since it's initial release, gwlbtun has had many improvements to its packet processing. Comparing some prior versions (2022.11 pre-Boost, 3.0, 3.2, and 3.3), and then v4.0 with its optional eBPF datapath ([below](#v40-with-the-ebpf-datapath)):
 
 | Frame size | 2022.11 (pre-Boost) | v3.0 | v3.2 | v3.3 |
 |------------|--------------------:|-----:|-----:|-----:|
@@ -369,6 +369,42 @@ Since it's initial release, gwlbtun has had many improvements to its packet proc
 The move to the concurrent hash map (v3.0) delivered roughly a 1.8&times; increase in sustained forwarding rate over the original design, and the subsequent tuning through v3.2 added another ~1.7&times;, compounding to about 3&times; over the 2022.11 baseline. v3.3 adds another 1.2-1.4&times; on this small instance; its larger gains are on instances with many vCPUs (see [README-Large-Instances.md](README-Large-Instances.md)). The gains are largest for small frames, where per-packet overhead dominates. The v3.2 and v3.3 columns were measured together, alternating between the two versions (three runs each, median shown); the older columns come from earlier sessions, so ratios against them are approximate (v3.2 measured 291-309k pps in an earlier session).
 
 **Test setup:** gwlbtun ran on a single **c6in.xlarge** behind a Gateway Load Balancer, with a TRex load generator (c6in.4xlarge) driving UDP traffic through the GWLB endpoint and back in a loopback topology. Each trial offered a fixed packet rate for 15 seconds across roughly 59,000 concurrent flows (randomized source port). The figure reported is the *delivered* forwarding ceiling - the highest sustained packets-per-second gwlbtun actually returned - taken as the maximum across an offered-load sweep of 0.5-8 Mpps. These are a relative comparison on identical hardware and topology. Your figures will vary with your specific workload (traffic sources, flow count and mix, packet sizes, and what the appliance does with each packet). We encourage you to test against your exact workload to gauge the performance you'll get.
+
+### v4.0 with the eBPF datapath
+v4.0 with `-e` ([eBPF acceleration](#ebpf-acceleration--e)) against v3.3, measured together on the same setup as above (Amazon Linux 2023 with Linux 6.18, from the `al2023-ami-kernel-6.18` AMI), alternating between the two versions with the same GWLB warm-up before each (see [Documentation/GWLB-Observations.md](Documentation/GWLB-Observations.md)): three runs each, median shown. v3.3 measured within 5% of its column above in this session.
+
+| Frame size | v3.3 | v4.0 (`-e`) | Ratio |
+|------------|-----:|------------:|------:|
+| 64 B   | 450k pps | 1,339k pps | 2.97&times; |
+| 128 B  | 446k pps | 1,340k pps | 3.01&times; |
+| 256 B  | 425k pps | 1,335k pps | 3.14&times; |
+| 512 B  | 389k pps | 1,316k pps | 3.38&times; |
+| 1024 B | 369k pps | 1,231k pps | 3.33&times; |
+| 1280 B | 356k pps | 1,212k pps | 3.41&times; |
+| 1518 B | 363k pps | 1,214k pps | 3.34&times; |
+
+The figures above are the delivered ceiling, which includes overloaded trials. The highest rate each version forwarded with almost no loss is a more useful number for sizing. Measured separately, with 30-second trials at fixed offered rates (two runs each, the worse run counted), the highest offered rate at which both runs lost no more than 0.02% end to end was:
+
+| Frame size | v3.3 | v4.0 (`-e`) |
+|------------|-----:|------------:|
+| 64 B   | 300k pps | 1.3M pps |
+| 256 B  | 400k pps | 1.2M pps |
+
+We observed this setup losing a few thousandths of a percent of packets end to end even at low rates (0.002-0.007% at 300k pps, for both versions), so a lower threshold would mostly measure that. Above these rates, v3.3's loss rose to about 9% at 500k pps, and v4.0's to about 1% at 1.4M pps.
+
+**Latency.** TRex also measured latency on a separate low-rate stream (1,000 pps) running alongside each trial, from the generator through GWLB and the appliance and back, during the 30-second trials above (median of the two runs; p99 is the lower bound of TRex's histogram bucket, which is 100 &micro;s wide below 1 ms and 1 ms wide above). The figures include the whole path (the generator, the network, GWLB and its endpoint, and the appliance), not just gwlbtun.
+
+| Frame size | Offered | v3.3 average / p99 | v4.0 (`-e`) average / p99 |
+|------------|--------:|-------------------:|--------------------------:|
+| 64 B  | 300k pps | 626 / 850 &micro;s  | 528 / 650 &micro;s |
+| 64 B  | 400k pps | 702 / 1,000 &micro;s | 524 / 750 &micro;s |
+| 64 B  | 1M pps   | overloaded (66% loss) | 591 / 750 &micro;s |
+| 64 B  | 1.2M pps | overloaded (74% loss) | 644 / 1,000 &micro;s |
+| 256 B | 300k pps | 728 / 950 &micro;s  | 520 / 600 &micro;s |
+| 256 B | 400k pps | 852 / 1,000 &micro;s | 526 / 600 &micro;s |
+| 256 B | 1.2M pps | overloaded (74% loss) | 690 / 1,000 &micro;s |
+
+**These latency figures vary considerably from run to run and test to test**: with GWLB's state, the time of day, the instances and the network path between them, and anything else sharing them. Read them as a comparison between the two versions, measured on exactly the same test setup at the same time, and not as the latency you should expect from your own deployment. In one 256 B run, v4.0's average rose to 2.5 ms at 1M pps (and loss to 0.06%) for a single trial while the other run, and the next rate up, were unaffected. As with the throughput figures, test with your own workload.
 
 ## Kernel sysctls
 Because most usages of gwlbtun have it sitting in the middle of a communications path (bump in the wire), none of the traffic is directly destined for it. Thus, in most cases, you should disable the reverse path filter (rp_filter) on associated GWI interfaces, in order for the kernel to allow the traffic through. The hook scripts are a good place to do this (the input interface is passed as $2) and the examples in example-scripts show different ways. One option:
